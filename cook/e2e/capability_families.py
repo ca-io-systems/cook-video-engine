@@ -250,11 +250,23 @@ class Families:
         layer = self.apply(p, op="addLayerClip", trackId=None, start=2.0, duration=2.0, effectId="concat.invert",
                            name="Invert")
         out, why = self.export(p, "layer.mp4")
-        outside = luma(out, 1.0, "iw/2:ih/2:iw/4:ih/4") if out else None
-        under = luma(out, 3.0, "iw/2:ih/2:iw/4:ih/4") if out else None
-        self.check("effect layer", "an invert layer over the second half turns bright footage under it dark",
-                   out and layer.get("createdId") and outside > 120 and under < outside - 40,
-                   {"lumaOutsideLayer": outside, "lumaUnderLayer": under, "refusal": why})
+        # Mean luma says little here: the negative of mid-grey footage is mid-grey. The frame under the layer
+        # is compared with the source frame of that instant (5 s + 3 s) as shot and as its negative.
+        if out:
+            under = frame(out, 3.0, os.path.join(self.out, "layer-under.png"))
+            shot = frame(self.footage, 8.0, os.path.join(self.out, "layer-source.png"))
+            negative = os.path.join(self.out, "layer-source-negative.png")
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", shot, "-vf", "negate", negative], check=True)
+            like_negative, like_shot = ssim(under, negative), ssim(under, shot)
+            before = ssim(frame(out, 1.0, os.path.join(self.out, "layer-before.png")),
+                          frame(self.footage, 6.0, os.path.join(self.out, "layer-source-before.png")))
+        else:
+            like_negative = like_shot = before = None
+        self.check("effect layer", "under an invert layer the footage is its own negative; before the layer it is as shot",
+                   out and layer.get("createdId") and like_negative > 0.8 and like_negative > like_shot + 0.3
+                   and before > 0.8,
+                   {"underLayerLikeNegative": like_negative, "underLayerLikeSource": like_shot,
+                    "beforeLayerLikeSource": before, "refusal": why})
 
     def transition(self):
         p = self.project("transition")
