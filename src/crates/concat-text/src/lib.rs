@@ -209,6 +209,25 @@ impl Fonts {
         self.db.load_font_file(path).is_ok()
     }
 
+    /// Whether a face of `family` is here: bundled, on the system, or added
+    /// with [`Fonts::add_file`]. Quotes are stripped as [`Fonts::pick`]
+    /// strips them. An empty name asks for no family and is always met.
+    ///
+    /// [`Fonts::pick`] never fails for want of a family - it paints with
+    /// some other face - so a caller that must not swap a typeface asks
+    /// this first.
+    pub fn has_family(&self, family: &str) -> bool {
+        let family = family.trim().trim_matches('"').trim_matches('\'');
+        if family.is_empty() || RETIRED.contains(&family) {
+            return true;
+        }
+        self.db.faces().any(|face| {
+            face.families
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(family))
+        })
+    }
+
     /// The best face for a style: the named family at the nearest weight and
     /// slant, then any sans-serif, then anything at all.
     fn pick(&self, style: &TitleStyle) -> Result<Vec<u8>, Error> {
@@ -930,6 +949,16 @@ mod tests {
             .pick(&style("\"Hanken Grotesk\"", 700.0, false))
             .expect("quotes stripped");
         assert_eq!(quoted, bundled);
+    }
+
+    #[test]
+    fn a_family_is_here_when_a_face_answers_to_its_name() {
+        let fonts = Fonts::new();
+        assert!(fonts.has_family("Hanken Grotesk"));
+        assert!(fonts.has_family("\"hanken grotesk\""), "quotes and case aside");
+        assert!(fonts.has_family(""), "no family asked for");
+        assert!(fonts.has_family("Helvetica Neue"), "retired names mean the bundled face");
+        assert!(!fonts.has_family("\"No Such Family\""));
     }
 
     /// A missing family falls back to a system face and still paints words.

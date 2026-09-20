@@ -89,6 +89,27 @@ def mean_volume_db(path):
     return None
 
 
+def chroma(path, at):
+    """The mean U and V of the frame at `at` seconds, inside the picture (letterbox bars left out)."""
+    run = subprocess.run(["ffmpeg", "-nostdin", "-v", "info", "-ss", str(at), "-i", path, "-frames:v", "1", "-vf",
+                          "crop=iw/2:ih/2:iw/4:ih/4,signalstats,metadata=print", "-f", "null", "-"],
+                         capture_output=True, text=True).stderr
+    values = {}
+    for line in run.splitlines():
+        for key in ("UAVG", "VAVG"):
+            if f"lavfi.signalstats.{key}=" in line:
+                values[key[0]] = float(line.split("=")[1])
+    return values
+
+
+def luma(path, at, crop):
+    """The mean luma of one region of the frame at `at` seconds."""
+    run = subprocess.run(["ffmpeg", "-nostdin", "-v", "info", "-ss", str(at), "-i", path, "-frames:v", "1", "-vf",
+                          f"crop={crop},signalstats,metadata=print", "-f", "null", "-"],
+                         capture_output=True, text=True).stderr
+    return next((float(l.split("=")[1]) for l in run.splitlines() if "lavfi.signalstats.YAVG" in l), None)
+
+
 def grey_png(path, width, height, value):
     """Writes an eight-bit grey PNG filled with `value`, left half only when value is a tuple."""
     rows = []
@@ -167,10 +188,16 @@ def main():
         view = engine.ok("edit.apply", path=project,
                          command={"op": "trimClip", "clipId": second["id"], "edge": "end", "delta": -tail})
 
-    # A look on the second piece, a fade-in between the two, a slower first piece.
+    # A picture effect in the audio list would render nothing: the API must say no, by id.
+    wrong = engine.call("edit.apply", path=project, command={
+        "op": "updateClip", "clipId": second["id"],
+        "patch": {"filters": [{"id": "concat.sepia", "params": {}, "enabled": True}]}})
+    check("a picture effect in the audio filter list is refused",
+          "error" in wrong and "concat.sepia" in wrong["error"]["message"], wrong.get("error"))
+    # Sepia on the second piece's picture, and a fade out at its end.
     engine.ok("edit.apply", path=project, command={
         "op": "updateClip", "clipId": second["id"],
-        "patch": {"filters": [{"id": "concat.sepia", "params": {}, "enabled": True}], "fadeOut": 0.5}})
+        "patch": {"videoEffects": [{"id": "concat.sepia", "params": {}, "enabled": True}], "fadeOut": 0.5}})
     view = engine.ok("edit.apply", path=project, command={
         "op": "addTextClip", "trackId": None, "above": True, "start": 0.5, "duration": 3.0,
         "style": {"content": "ENGINE PROOF", "fontSize": 0.12, "fontWeight": 700, "color": "#ffffff",
@@ -224,6 +251,25 @@ def main():
     for name, at in (("export-title", 1.5), ("export-sepia", 6.0)):
         subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", str(at), "-i", exported, "-frames:v", "1",
                         os.path.join(out, name + ".png")], check=True)
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", "6.0", "-i", footage, "-frames:v", "1",
+                    os.path.join(out, "source-at-6s.png")], check=True)
+    # Sepia is warm: against the untreated source frame of the same instant, red-difference chroma (V)
+    # rises and blue-difference chroma (U) falls.
+    treated = chroma(exported, 6.0)
+    untreated = chroma(footage, 6.0)
+    check("the sepia effect changed the exported picture's colour",
+          treated["V"] - untreated["V"] > 3 and untreated["U"] - treated["U"] > 3,
+          {"treated": treated, "untreated": untreated})
+
+    # A title in a family the machine does not have: refused, not painted in another face.
+    swapped = engine.ok("edit.apply", path=project, command={
+        "op": "addTextClip", "trackId": None, "above": True, "start": 4.5, "duration": 1.0,
+        "style": {"content": "WRONG FACE", "fontFamily": "No Such Family"}})
+    refused_font = engine.call("export.run", path=project, output=os.path.join(out, "swapped-face.mp4"))
+    check("an export with a title in a font that is not here is refused",
+          "error" in refused_font and "No Such Family" in refused_font["error"]["message"]
+          and not os.path.exists(os.path.join(out, "swapped-face.mp4")), refused_font.get("error"))
+    engine.ok("edit.apply", path=project, command={"op": "removeClips", "clipIds": [swapped["createdId"]]})
 
     # A cutout with no masks: the export must be refused, never rendered untreated.
     engine.ok("edit.apply", path=project, command={
@@ -257,16 +303,13 @@ def main():
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", "2.0", "-i", cut, "-frames:v", "1",
                     os.path.join(out, "export-cutout.png")], check=True)
     # The right half was masked out, so it is the black of an empty frame; the left half is footage.
-    stats = subprocess.run(["ffmpeg", "-nostdin", "-v", "info", "-ss", "2.0", "-i", cut, "-frames:v", "1", "-vf",
-                            "crop=iw/4:ih/2:iw*5/8:ih/4,signalstats,metadata=print", "-f", "null", "-"],
-                           capture_output=True, text=True).stderr
-    right_luma = next((float(l.split("=")[1]) for l in stats.splitlines() if "lavfi.signalstats.YAVG" in l), None)
-    stats = subprocess.run(["ffmpeg", "-nostdin", "-v", "info", "-ss", "2.0", "-i", cut, "-frames:v", "1", "-vf",
-                            "crop=iw/4:ih/2:iw/8:ih/4,signalstats,metadata=print", "-f", "null", "-"],
-                           capture_output=True, text=True).stderr
-    left_luma = next((float(l.split("=")[1]) for l in stats.splitlines() if "lavfi.signalstats.YAVG" in l), None)
+    # Sampled at 3.8 s: the title ended at 3.5 s and the cut-out piece runs to 4 s. One band inside the picture on each half.
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", "3.8", "-i", cut, "-frames:v", "1",
+                    os.path.join(out, "export-cutout-no-title.png")], check=True)
+    right_luma = luma(cut, 3.8, "iw/4:ih/3:iw*5/8:ih/3")
+    left_luma = luma(cut, 3.8, "iw/4:ih/3:iw/8:ih/3")
     check("the masked half of the picture is gone and the kept half is there",
-          right_luma is not None and left_luma is not None and right_luma < 20 and left_luma > right_luma + 10,
+          right_luma is not None and left_luma is not None and right_luma < 18 and left_luma > right_luma + 10,
           {"keptHalfLuma": left_luma, "maskedHalfLuma": right_luma})
 
     engine.ok("project.close", path=project, save=True)

@@ -322,6 +322,7 @@ impl Api {
 
     /// [`Request::EditApply`].
     pub fn apply(&mut self, path: &str, command: Command) -> Result<EditorView, ApiError> {
+        check_packages(&command)?;
         self.session_mut(path)?.apply(command).map_err(refused)
     }
 
@@ -427,6 +428,24 @@ impl Api {
                     "The export needs cutout masks that have not been imported: {}. \
                      See cutout.status, then cutout.import.",
                     lacking.join("; ")
+                ),
+            ));
+        }
+        // A title whose family is not here would be painted in another
+        // face without a word; refused for the same reason.
+        let unfound = self.titles.missing_families(session.project());
+        if !unfound.is_empty() {
+            let named: Vec<String> = unfound
+                .iter()
+                .map(|(clip, family)| format!("{clip} ({family})"))
+                .collect();
+            return Err(ApiError::new(
+                ErrorCode::Refused,
+                format!(
+                    "The export has titles in a font this machine does not have: {}. \
+                     Add the font file to the project with the addFont command, or name \
+                     a family that is here.",
+                    named.join("; ")
                 ),
             ));
         }
@@ -721,6 +740,54 @@ impl ExportJob {
     }
 }
 
+/// Refuses a command that names a package the render would leave out.
+///
+/// The catalogue composes a chain from what it recognises and says nothing
+/// about the rest: an id it does not hold, or a package of a kind the list
+/// does not run - a picture effect among a clip's audio filters - adds
+/// nothing, and the clip renders untreated. A window only ever offers a
+/// list the packages that fit it; a caller writing JSON can name anything,
+/// so the API says no here, by id, instead of exporting a clip that silently
+/// lacks what was asked for.
+fn check_packages(command: &Command) -> Result<(), ApiError> {
+    fn check(list: &str, id: &str, kinds: &[Kind]) -> Result<(), ApiError> {
+        let names = |kinds: &[Kind]| {
+            kinds
+                .iter()
+                .map(|kind| format!("{kind:?}").to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        };
+        match Catalogue::builtin().get(id) {
+            None => Err(ApiError::invalid(format!(
+                "{list} names {id:?}, which is not a package this build has; see catalogue.list"
+            ))),
+            Some(package) if !kinds.contains(&package.kind()) => Err(ApiError::invalid(format!(
+                "{list} names {id:?}, a {} package; {list} runs {} packages only",
+                names(&[package.kind()]),
+                names(kinds)
+            ))),
+            Some(_) => Ok(()),
+        }
+    }
+    match command {
+        Command::Batch { commands } => commands.iter().try_for_each(check_packages),
+        Command::UpdateClip { patch, .. } => {
+            for applied in patch.filters.iter().flatten() {
+                check("filters", &applied.id, &[Kind::Audio])?;
+            }
+            for applied in patch.video_effects.iter().flatten() {
+                check("videoEffects", &applied.id, &[Kind::Effect, Kind::Filter])?;
+            }
+            if let Some(Some(transition)) = &patch.transition_in {
+                check("transitionIn", &transition.id, &[Kind::Transition])?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// [`Request::CatalogueAnimations`]: the names each slot of a clip offers,
 /// in menu order.
 fn animations() -> Vec<AnimationInfo> {
@@ -953,6 +1020,90 @@ mod tests {
             ]),
             "each name once, in the order added"
         );
+    }
+
+    #[test]
+    fn a_package_the_render_would_leave_out_is_refused_by_id() {
+        use concat_project::commands::ClipPatch;
+        use concat_project::model::AppliedFilter;
+
+        let (mut api, scratch, _events) = api();
+        let path = project(&mut api, &scratch, "Packages");
+        let added = view(ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddMedia {
+                item: still("/nowhere/still.png"),
+            }),
+        })));
+        let placed = view(ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddClipAtFirstFree {
+                media_id: added.created_id.expect("minted"),
+                start: 0.0,
+            }),
+        })));
+        let clip_id = placed.created_id.expect("minted");
+        let patch = |patch: ClipPatch| Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::UpdateClip {
+                clip_id: clip_id.clone(),
+                patch,
+            }),
+        };
+
+        // A picture effect among the audio filters would render nothing.
+        let wrong_list = err(api.dispatch(patch(ClipPatch {
+            filters: Some(vec![AppliedFilter::new("concat.sepia")]),
+            ..ClipPatch::default()
+        })));
+        assert_eq!(wrong_list.code, ErrorCode::Invalid);
+        assert!(wrong_list.message.contains("concat.sepia"), "{}", wrong_list.message);
+
+        let unknown = err(api.dispatch(patch(ClipPatch {
+            video_effects: Some(vec![AppliedFilter::new("nobody.made-this")]),
+            ..ClipPatch::default()
+        })));
+        assert_eq!(unknown.code, ErrorCode::Invalid);
+
+        let treated = view(ok(api.dispatch(patch(ClipPatch {
+            video_effects: Some(vec![AppliedFilter::new("concat.sepia")]),
+            ..ClipPatch::default()
+        }))));
+        assert_eq!(treated.project.active().clips[0].video_effects.len(), 1);
+    }
+
+    #[test]
+    fn a_title_in_a_font_that_is_not_here_refuses_the_export() {
+        use concat_project::model::TextStyle;
+
+        let (mut api, scratch, _events) = api();
+        let path = project(&mut api, &scratch, "Fonts");
+        ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddTextClip {
+                track_id: None,
+                above: false,
+                start: 0.0,
+                style: Some(TextStyle {
+                    content: "Hello".to_owned(),
+                    font_family: "\"No Such Family\"".to_owned(),
+                    ..TextStyle::default()
+                }),
+                duration: Some(1.0),
+                offset_y: None,
+            }),
+        }));
+        let output = scratch.path().join("swapped-face.mp4");
+        let refused = err(api.dispatch(Request::ExportRun {
+            path,
+            spec: ExportSpec {
+                output: output.to_string_lossy().into_owned(),
+                ..ExportSpec::default()
+            },
+        }));
+        assert_eq!(refused.code, ErrorCode::Refused);
+        assert!(refused.message.contains("No Such Family"), "{}", refused.message);
+        assert!(!output.exists(), "nothing is rendered in another face");
     }
 
     #[test]

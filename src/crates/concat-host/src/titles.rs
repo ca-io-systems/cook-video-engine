@@ -99,6 +99,32 @@ impl Titles {
         self.clips_with(project, width, height, false)
     }
 
+    /// The text clips of the active timeline whose family no face here
+    /// answers to - not bundled, not on this machine, not among the fonts
+    /// the project added - as the clip's id and the family it names. The
+    /// painter would swap another face in for each and say nothing, so an
+    /// export asks this first and is refused while the list is not empty.
+    pub fn missing_families(&self, project: &Project) -> Vec<(String, String)> {
+        let mut fonts = self.fonts.lock().unwrap_or_else(|e| e.into_inner());
+        let fonts = fonts.get_or_insert_with(Fonts::new);
+        let mut loaded = self.loaded_files.lock().unwrap_or_else(|e| e.into_inner());
+        for font in &project.fonts {
+            if !font.path.is_empty() && loaded.insert(font.path.clone()) {
+                fonts.add_file(Path::new(&font.path));
+            }
+        }
+        project
+            .active()
+            .clips
+            .iter()
+            .filter(|clip| clip.kind == ModelClipKind::Text)
+            .filter_map(|clip| {
+                let family = clip.text.clone().unwrap_or_default().font_family;
+                (!fonts.has_family(&family)).then(|| (clip.id.clone(), family))
+            })
+            .collect()
+    }
+
     /// [`Titles::clips`] for a monitor showing a change as it is made:
     /// every title is painted in memory at `width` by `height` - the
     /// monitor's own size, not the output's - and comes back with its
