@@ -30,6 +30,19 @@ pub fn init() {
     });
 }
 
+/// A `va_list` as it arrives in a callback's parameter list.
+///
+/// On x86-64 outside Windows `va_list` is a one-element array, and C hands
+/// an array parameter over as a pointer to its element, which is how the
+/// generated bindings spell `av_log_set_callback`'s callback and
+/// `av_log_format_line2`. Everywhere else `va_list` is passed as it is.
+/// Naming the array type here instead does not compile on Linux x86-64.
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+type VaListArg = *mut ffmpeg::sys::__va_list_tag;
+/// A `va_list` as it arrives in a callback's parameter list.
+#[cfg(not(all(target_arch = "x86_64", not(target_os = "windows"))))]
+type VaListArg = ffmpeg::sys::va_list;
+
 /// FFmpeg's log, through the `log` facade instead of standard error.
 ///
 /// Left to itself FFmpeg prints on stderr, which a packaged GUI build has
@@ -46,7 +59,7 @@ unsafe extern "C" fn relay(
     context: *mut c_void,
     level: c_int,
     format: *const c_char,
-    args: ffmpeg::sys::va_list,
+    args: VaListArg,
 ) {
     // The level set in `init` is applied by FFmpeg's *default* callback,
     // not before the callback is called: a callback of our own is handed
