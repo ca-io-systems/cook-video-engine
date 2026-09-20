@@ -268,10 +268,12 @@ class Families:
         self.apply(p, op="trimClip", clipId=second, edge="end", delta=-(self.clip(p, second)["duration"] - 3.0))
         self.apply(p, op="updateClip", clipId=second, patch={"transitionIn": {"id": "cross-fade", "duration": 1.0}})
         out, why = self.export(p, "transition.mp4")
+        # The incoming clip reaches back over the outgoing one, so the fade runs over the second before the cut
+        # at 3 s: 2.0 s to 3.0 s, with its middle at 2.5 s.
         before = luma(out, 1.0, "iw/2:ih/2:iw/4:ih/4") if out else None
-        middle = luma(out, 3.0, "iw/2:ih/2:iw/4:ih/4") if out else None
+        middle = luma(out, 2.5, "iw/2:ih/2:iw/4:ih/4") if out else None
         after = luma(out, 5.0, "iw/2:ih/2:iw/4:ih/4") if out else None
-        self.check("transition", "a 1 s cross-fade from white to black passes through grey",
+        self.check("transition", "a 1 s cross-fade from white to black is grey half way through",
                    out and before > 200 and after < 40 and 40 < middle < 200,
                    {"lumaBefore": before, "lumaMidTransition": middle, "lumaAfter": after, "refusal": why})
 
