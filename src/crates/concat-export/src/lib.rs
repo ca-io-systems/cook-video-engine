@@ -288,6 +288,21 @@ fn linear_ease() -> [f64; 4] {
     [0.0, 0.0, 1.0, 1.0]
 }
 
+/// Every transition [`TransitionSpec::kind`] renders. They are not packages
+/// of the effects catalogue: the two `match`es in this file that resolve a
+/// cut name them, and a kind outside this list renders as a plain cut. A
+/// caller that must not lose a transition without being told checks a name
+/// against this list first; keep it in step with those two `match`es.
+pub const TRANSITION_KINDS: [&str; 7] = [
+    "cross-fade",
+    "fade-black",
+    "fade-white",
+    "push",
+    "zoom",
+    "wipe-left",
+    "wipe-right",
+];
+
 /// A transition on the cut into a clip.
 #[derive(Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]

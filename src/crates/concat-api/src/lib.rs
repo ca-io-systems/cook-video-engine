@@ -191,6 +191,12 @@ impl Api {
             Request::CatalogueList { kind } => Ok(Reply::Packages(catalogue(kind.as_deref())?)),
             Request::CatalogueTextPresets => Ok(Reply::TextPresets(self.text_presets())),
             Request::CatalogueAnimations => Ok(Reply::Animations(animations())),
+            Request::CatalogueTransitions => Ok(Reply::Transitions(
+                concat_export::TRANSITION_KINDS
+                    .iter()
+                    .map(|kind| (*kind).to_owned())
+                    .collect(),
+            )),
             Request::CutoutStatus { path } => Ok(Reply::Cutouts(self.cutout_status(&path)?)),
             Request::CutoutImport {
                 path,
@@ -779,8 +785,17 @@ fn check_packages(command: &Command) -> Result<(), ApiError> {
             for applied in patch.video_effects.iter().flatten() {
                 check("videoEffects", &applied.id, &[Kind::Effect, Kind::Filter])?;
             }
-            if let Some(Some(transition)) = &patch.transition_in {
-                check("transitionIn", &transition.id, &[Kind::Transition])?;
+            // Transitions are not catalogue packages; the export names the
+            // ones it renders and cuts straight through any other.
+            if let Some(Some(transition)) = &patch.transition_in
+                && !concat_export::TRANSITION_KINDS.contains(&transition.id.as_str())
+            {
+                return Err(ApiError::invalid(format!(
+                    "transitionIn names {:?}, which would render as a plain cut; \
+                     the transitions are {}",
+                    transition.id,
+                    concat_export::TRANSITION_KINDS.join(", ")
+                )));
             }
             Ok(())
         }
@@ -1074,6 +1089,29 @@ mod tests {
             ..ClipPatch::default()
         }))));
         assert_eq!(treated.project.active().clips[0].video_effects.len(), 1);
+
+        // A transition the export does not render would be a plain cut.
+        use concat_project::model::Transition;
+        let cut = err(api.dispatch(patch(ClipPatch {
+            transition_in: Some(Some(Transition {
+                id: "spin".to_owned(),
+                duration: 0.5,
+            })),
+            ..ClipPatch::default()
+        })));
+        assert_eq!(cut.code, ErrorCode::Invalid);
+        assert!(cut.message.contains("cross-fade"), "{}", cut.message);
+        ok(api.dispatch(patch(ClipPatch {
+            transition_in: Some(Some(Transition {
+                id: "cross-fade".to_owned(),
+                duration: 0.5,
+            })),
+            ..ClipPatch::default()
+        })));
+        let Reply::Transitions(kinds) = ok(api.dispatch(Request::CatalogueTransitions)) else {
+            panic!("not transitions");
+        };
+        assert_eq!(kinds.len(), 7);
     }
 
     #[test]

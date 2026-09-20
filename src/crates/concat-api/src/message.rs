@@ -201,6 +201,11 @@ pub enum Request {
     /// `combo` - in menu order.
     #[serde(rename = "catalogue.animations")]
     CatalogueAnimations,
+    /// The transitions a clip's `transitionIn` can name. They are not
+    /// packages, so `catalogue.list` does not hold them; any other name
+    /// would render as a plain cut and is refused by `edit.apply`.
+    #[serde(rename = "catalogue.transitions")]
+    CatalogueTransitions,
 
     /// For every media file the active timeline cuts out: which source
     /// instants still have no mask. An export is refused until every list
@@ -343,6 +348,8 @@ pub enum Reply {
     TextPresets(Vec<TextPresetInfo>),
     /// `catalogue.animations`.
     Animations(Vec<AnimationInfo>),
+    /// `catalogue.transitions`.
+    Transitions(Vec<String>),
     /// `cutout.status`.
     Cutouts(Vec<CutoutStatus>),
     /// `cutout.import`.
