@@ -763,7 +763,7 @@ fn check_packages(command: &Command) -> Result<(), ApiError> {
                 "{list} names {id:?}, which is not a package this build has; see catalogue.list"
             ))),
             Some(package) if !kinds.contains(&package.kind()) => Err(ApiError::invalid(format!(
-                "{list} names {id:?}, a {} package; {list} runs {} packages only",
+                "{list} names {id:?}, a package of kind {}; {list} runs packages of kind {} only",
                 names(&[package.kind()]),
                 names(kinds)
             ))),
