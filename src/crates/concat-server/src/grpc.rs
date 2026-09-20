@@ -247,7 +247,10 @@ mod tests {
         };
         let value: Value = serde_json::from_str(&text).expect("JSON");
         assert_eq!(value["apiVersion"], concat_api::API_VERSION);
-        assert_eq!(value["capabilities"], json!(["events", "grpc"]));
+        assert_eq!(
+            value["capabilities"],
+            json!(["events", "cutout.import", "catalogue.presets", "grpc"])
+        );
 
         let refused = client
             .call(with_bearer(

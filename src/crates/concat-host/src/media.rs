@@ -894,13 +894,22 @@ mod tests {
     fn cache_keys_are_stable() {
         // Pinned: a changed hash would orphan every project's caches.
         assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
+        // The resolution is in the name so that changing it makes new
+        // caches instead of misreading old ones; upstream raised it from
+        // 200 to 1000 and left `b200` written here, which failed.
         assert_eq!(
             peaks_key("/a.mp4", None),
-            format!("{:016x}-b200.peaks", fnv1a(b"/a.mp4"))
+            format!(
+                "{:016x}-b{PEAKS_BUCKETS_PER_SECOND}.peaks",
+                fnv1a(b"/a.mp4")
+            )
         );
         assert_eq!(
             peaks_key("/a.mp4", Some(2)),
-            format!("{:016x}-s2-b200.peaks", fnv1a(b"/a.mp4"))
+            format!(
+                "{:016x}-s2-b{PEAKS_BUCKETS_PER_SECOND}.peaks",
+                fnv1a(b"/a.mp4")
+            )
         );
     }
 
