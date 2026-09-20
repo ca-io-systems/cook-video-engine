@@ -353,7 +353,7 @@ class Families:
 
         p = self.project("vertical", 1080, 1920)
         m = self.media(p, self.footage)
-        self.piece(p, m["id"], 10, 12)
+        self.piece(p, m["id"], 5, 7)
         out, why = self.export(p, "vertical.mp4")
         video = next(s for s in ffprobe(out)["streams"] if s["codec_type"] == "video") if out else {}
         self.check("frame", "a 1080x1920 project exports a 1080x1920 file",
