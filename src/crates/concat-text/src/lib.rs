@@ -955,9 +955,15 @@ mod tests {
     fn a_family_is_here_when_a_face_answers_to_its_name() {
         let fonts = Fonts::new();
         assert!(fonts.has_family("Hanken Grotesk"));
-        assert!(fonts.has_family("\"hanken grotesk\""), "quotes and case aside");
+        assert!(
+            fonts.has_family("\"hanken grotesk\""),
+            "quotes and case aside"
+        );
         assert!(fonts.has_family(""), "no family asked for");
-        assert!(fonts.has_family("Helvetica Neue"), "retired names mean the bundled face");
+        assert!(
+            fonts.has_family("Helvetica Neue"),
+            "retired names mean the bundled face"
+        );
         assert!(!fonts.has_family("\"No Such Family\""));
     }
 

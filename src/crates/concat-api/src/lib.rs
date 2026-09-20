@@ -1057,7 +1057,11 @@ mod tests {
             ..ClipPatch::default()
         })));
         assert_eq!(wrong_list.code, ErrorCode::Invalid);
-        assert!(wrong_list.message.contains("concat.sepia"), "{}", wrong_list.message);
+        assert!(
+            wrong_list.message.contains("concat.sepia"),
+            "{}",
+            wrong_list.message
+        );
 
         let unknown = err(api.dispatch(patch(ClipPatch {
             video_effects: Some(vec![AppliedFilter::new("nobody.made-this")]),
@@ -1102,7 +1106,11 @@ mod tests {
             },
         }));
         assert_eq!(refused.code, ErrorCode::Refused);
-        assert!(refused.message.contains("No Such Family"), "{}", refused.message);
+        assert!(
+            refused.message.contains("No Such Family"),
+            "{}",
+            refused.message
+        );
         assert!(!output.exists(), "nothing is rendered in another face");
     }
 
