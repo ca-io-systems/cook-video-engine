@@ -4,7 +4,7 @@ name: CI
 # models. Mirrors what upstream's "Engine tests and lints" job checks.
 on:
   push:
-    branches: [cook/white-mantis]
+    branches: [engine]
   pull_request:
 
 concurrency:

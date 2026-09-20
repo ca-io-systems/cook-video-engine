@@ -22,7 +22,7 @@ Concat project ([`TRADEMARK.md`](TRADEMARK.md)); this fork uses the name only to
 say what it is forked from, and ships none of the logos.
 
 This repository is the complete corresponding source of the engine Cook
-serves. The branch Cook builds from is `cook/white-mantis`; the engine's
+serves. The branch Cook builds from is `engine`; the engine's
 `version` call reports the commit a running build was made from.
 
 ## What was changed, and when
