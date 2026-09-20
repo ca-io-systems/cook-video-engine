@@ -194,7 +194,7 @@ def main():
         "patch": {"filters": [{"id": "concat.sepia", "params": {}, "enabled": True}]}})
     check("a picture effect in the audio filter list is refused",
           "error" in wrong and "concat.sepia" in wrong["error"]["message"], wrong.get("error"))
-    # Sepia on the second piece's picture, and a fade out at its end.
+    # Sepia on the second piece's picture, and its sound ramped out over the last half second.
     engine.ok("edit.apply", path=project, command={
         "op": "updateClip", "clipId": second["id"],
         "patch": {"videoEffects": [{"id": "concat.sepia", "params": {}, "enabled": True}], "fadeOut": 0.5}})
