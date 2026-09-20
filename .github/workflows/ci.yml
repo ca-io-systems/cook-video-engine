@@ -69,6 +69,13 @@ jobs:
           ffmpeg -nostdin -v error -y -f lavfi -i "testsrc2=size=1280x720:rate=30:duration=12" \
             -f lavfi -i "sine=frequency=440:duration=12" -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest footage.mp4
           python3 cook/e2e/engine_e2e.py --cli src/target/release/concat-cli --footage footage.mp4 --out e2e-out
+      # One measured check per family of edits. These read real scenes - a bright one at 5 s, a dark one at
+      # 20 s - so they run on the Sintel trailer (CC BY, Blender Foundation), not on a test pattern.
+      - name: Every family of edits, through the API
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-all-errors -o sintel.mp4 https://download.blender.org/durian/trailer/sintel_trailer-720p.mp4
+          python3 cook/e2e/capability_families.py --cli src/target/release/concat-cli --footage sintel.mp4 --out families-out
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -77,4 +84,5 @@ jobs:
             e2e-out/report.json
             e2e-out/*.png
             e2e-out/document.json
+            families-out/families.json
           if-no-files-found: ignore

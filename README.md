@@ -46,6 +46,12 @@ Forked from upstream commit `28d94eae86d6177f0c090f50ddf383748a4b07a1`
 - **Inventories through the API.** The text preset inventory moved from the
   window crate into `concat-host` and is listed by `catalogue.textPresets`;
   clip animation names are listed by `catalogue.animations`.
+- **Refused instead of rendered wrong.** `edit.apply` refuses a package id the
+  catalogue lacks, a package of a kind its list does not run, and a transition
+  the export would render as a plain cut (`catalogue.transitions` lists the
+  seven it renders). `export.run` refuses a title whose font family no face on
+  the machine answers to. The default title family is the bundled Hanken
+  Grotesk; upstream's default names a family no build ships.
 - **Linux x86-64 compile fix** in `concat-media/src/ffi.rs` (the `va_list`
   parameter of the FFmpeg log callback). Upstream's own CI fails on it at the
   forked commit.
@@ -62,7 +68,11 @@ cargo build --release -p concat-cli
 ```
 
 `cook/e2e/engine_e2e.py` drives a built `concat-cli` through a real import,
-edit, preview and export and measures the exported file:
+edit, preview and export and measures the exported file;
+`cook/e2e/capability_families.py` does one measured check per family of edits
+(speed, reverse, freeze, transform, keyframes, animation, effect layer,
+transition, audio, arranging, timelines, frame size, export codecs, fonts,
+templates) and takes the same arguments:
 
 ```sh
 python3 cook/e2e/engine_e2e.py --cli src/target/release/concat-cli \
