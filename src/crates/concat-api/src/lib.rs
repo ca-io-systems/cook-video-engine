@@ -416,12 +416,8 @@ impl Api {
             .into_iter()
             .filter_map(|(media_id, request)| {
                 let missing = Cutouts::outstanding(&request);
-                (missing != 0).then(|| {
-                    format!(
-                        "{media_id} ({}): {missing} missing",
-                        request.subject.key()
-                    )
-                })
+                (missing != 0)
+                    .then(|| format!("{media_id} ({}): {missing} missing", request.subject.key()))
             })
             .collect();
         if !lacking.is_empty() {
@@ -474,9 +470,7 @@ impl Api {
                 name: preset.name,
                 style: preset.style,
                 offset_y: preset.offset_y,
-                font: preset
-                    .font
-                    .map(|path| path.to_string_lossy().into_owned()),
+                font: preset.font.map(|path| path.to_string_lossy().into_owned()),
             })
             .collect()
     }
@@ -494,7 +488,11 @@ impl Api {
                 media_path: request.media_path,
                 subject: request.subject.key().to_owned(),
                 still: request.still,
-                ranges: request.ranges.iter().map(|&(from, to)| [from, to]).collect(),
+                ranges: request
+                    .ranges
+                    .iter()
+                    .map(|&(from, to)| [from, to])
+                    .collect(),
                 step_ms: cutout::STEP_MS,
             })
             .collect())
@@ -964,7 +962,11 @@ mod tests {
             panic!("not text presets");
         };
         assert_eq!(presets[0].id, "default");
-        assert!(presets.iter().any(|preset| preset.id == "concat.lower-third"));
+        assert!(
+            presets
+                .iter()
+                .any(|preset| preset.id == "concat.lower-third")
+        );
         let Reply::Animations(animations) = ok(api.dispatch(Request::CatalogueAnimations)) else {
             panic!("not animations");
         };

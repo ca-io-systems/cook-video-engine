@@ -116,7 +116,11 @@ impl Cutouts {
             request.subject,
         ));
         if request.still {
-            return if store.is_empty() { vec![0] } else { Vec::new() };
+            return if store.is_empty() {
+                vec![0]
+            } else {
+                Vec::new()
+            };
         }
         let mut wanted: Vec<u64> = request
             .ranges
@@ -149,8 +153,9 @@ impl Cutouts {
         for (millis, file) in frames {
             let bytes = std::fs::read(file)
                 .map_err(|error| format!("could not read {}: {error}", file.display()))?;
-            let mask = Mask::from_png(&bytes)
-                .ok_or_else(|| format!("{} is not a PNG a mask can be read from", file.display()))?;
+            let mask = Mask::from_png(&bytes).ok_or_else(|| {
+                format!("{} is not a PNG a mask can be read from", file.display())
+            })?;
             // A still keeps its one mask at instant zero, whatever the
             // caller named it.
             masks.push((if request.still { 0 } else { *millis }, mask));
@@ -262,7 +267,10 @@ mod tests {
         let file = project.join("000004200.png");
         std::fs::write(&file, Mask::filled(4, 4, 255).to_png()).expect("writes");
         let cutouts = Cutouts::new();
-        assert_eq!(cutouts.import(&request, "cloud-model", &[(4200, file)]), Ok(1));
+        assert_eq!(
+            cutouts.import(&request, "cloud-model", &[(4200, file)]),
+            Ok(1)
+        );
         assert!(Cutouts::missing(&request).is_empty());
         let _ = std::fs::remove_dir_all(&project);
     }
