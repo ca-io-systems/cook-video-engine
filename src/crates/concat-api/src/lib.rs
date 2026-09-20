@@ -929,7 +929,15 @@ mod tests {
         let (mut api, _scratch, _events) = api();
         let base = api.version();
         assert_eq!(base.api_version, API_VERSION);
-        assert_eq!(base.capabilities, vec!["events".to_owned()]);
+        assert_eq!(
+            base.capabilities,
+            vec![
+                "events".to_owned(),
+                "cutout.import".to_owned(),
+                "catalogue.presets".to_owned()
+            ]
+        );
+        assert_eq!(base.source, SOURCE);
         assert!(!base.capabilities.iter().any(|name| name == "gpu"));
 
         api.add_capability("json-rpc");
@@ -938,9 +946,118 @@ mod tests {
         let served = serde_json::to_value(ok(api.dispatch(Request::Version))).expect("JSON");
         assert_eq!(
             served["capabilities"],
-            json!(["events", "json-rpc", "grpc"]),
+            json!([
+                "events",
+                "cutout.import",
+                "catalogue.presets",
+                "json-rpc",
+                "grpc"
+            ]),
             "each name once, in the order added"
         );
+    }
+
+    #[test]
+    fn the_title_and_animation_inventories_are_listed() {
+        let (mut api, _scratch, _events) = api();
+        let Reply::TextPresets(presets) = ok(api.dispatch(Request::CatalogueTextPresets)) else {
+            panic!("not text presets");
+        };
+        assert_eq!(presets[0].id, "default");
+        assert!(presets.iter().any(|preset| preset.id == "concat.lower-third"));
+        let Reply::Animations(animations) = ok(api.dispatch(Request::CatalogueAnimations)) else {
+            panic!("not animations");
+        };
+        let slots: Vec<&str> = animations.iter().map(|info| info.slot.as_str()).collect();
+        assert_eq!(slots, ["in", "out", "combo"]);
+        assert!(animations.iter().all(|info| !info.names.is_empty()));
+    }
+
+    #[test]
+    fn a_cutout_with_no_masks_refuses_the_export_until_they_are_imported() {
+        use concat_project::model::{Cutout, CutoutMode, Subject};
+
+        let (mut api, scratch, _events) = api();
+        let path = project(&mut api, &scratch, "Cutout");
+        let added = view(ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddMedia {
+                item: still("/nowhere/still.png"),
+            }),
+        })));
+        let media_id = added.created_id.expect("minted");
+        let placed = view(ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::AddClipAtFirstFree {
+                media_id: media_id.clone(),
+                start: 0.0,
+            }),
+        })));
+        let clip_id = placed.created_id.expect("minted");
+        ok(api.dispatch(Request::EditApply {
+            path: path.clone(),
+            command: Box::new(Command::SetClipCutout {
+                clip_id,
+                cutout: Some(Cutout {
+                    mode: CutoutMode::Auto,
+                    subject: Subject::Person,
+                    feather: 0.0,
+                    strokes: Vec::new(),
+                }),
+            }),
+        }));
+
+        let Reply::Cutouts(status) = ok(api.dispatch(Request::CutoutStatus { path: path.clone() }))
+        else {
+            panic!("not a cutout status");
+        };
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].media_id, media_id);
+        assert_eq!(status[0].subject, "person");
+        assert_eq!(status[0].missing, vec![0], "a still needs its one mask");
+
+        let output = scratch.path().join("untreated.mp4");
+        let refused = err(api.dispatch(Request::ExportRun {
+            path: path.clone(),
+            spec: ExportSpec {
+                output: output.to_string_lossy().into_owned(),
+                ..ExportSpec::default()
+            },
+        }));
+        assert_eq!(refused.code, ErrorCode::Refused);
+        assert!(refused.message.contains(&media_id), "{}", refused.message);
+        assert!(!output.exists(), "nothing is rendered untreated");
+
+        let masks = scratch.path().join("masks");
+        std::fs::create_dir_all(&masks).expect("a directory");
+        let mut png = Vec::new();
+        encode_png(&mut png, 2, 2, &[255; 16]).expect("encodes");
+        std::fs::write(masks.join("000000000.png"), png).expect("writes");
+        let Reply::MasksImported(imported) = ok(api.dispatch(Request::CutoutImport {
+            path: path.clone(),
+            media_id: media_id.clone(),
+            subject: Some("person".to_owned()),
+            source: "test-model".to_owned(),
+            masks: masks.to_string_lossy().into_owned(),
+        })) else {
+            panic!("not an import");
+        };
+        assert_eq!(imported.imported, 1);
+
+        let Reply::Cutouts(status) = ok(api.dispatch(Request::CutoutStatus { path: path.clone() }))
+        else {
+            panic!("not a cutout status");
+        };
+        assert!(status[0].missing.is_empty());
+
+        let unknown = err(api.dispatch(Request::CutoutImport {
+            path,
+            media_id: "nobody".to_owned(),
+            subject: None,
+            source: "test-model".to_owned(),
+            masks: masks.to_string_lossy().into_owned(),
+        }));
+        assert_eq!(unknown.code, ErrorCode::NotFound);
     }
 
     #[test]
