@@ -193,9 +193,51 @@ pub enum Request {
         name: String,
     },
 
-    /// Renders an open project's active timeline to a file, exactly as
-    /// the window's Export does: cutouts analysed, titles painted, then the
-    /// frame loop and the mix. Returns at once with the job's name; the
+    /// Every text preset: the built-in looks a title can be given, then the
+    /// ones in this machine's `text-presets` folder.
+    #[serde(rename = "catalogue.textPresets")]
+    CatalogueTextPresets,
+    /// The animation names each slot of a clip offers - `in`, `out` and
+    /// `combo` - in menu order.
+    #[serde(rename = "catalogue.animations")]
+    CatalogueAnimations,
+
+    /// For every media file the active timeline cuts out: which source
+    /// instants still have no mask. An export is refused until every list
+    /// here is empty.
+    #[serde(rename = "cutout.status")]
+    CutoutStatus {
+        /// The project folder.
+        path: String,
+    },
+    /// Imports a finished set of masks for one media file, all of them or
+    /// none. `masks` is a directory of `<millis>.png` files: each is the
+    /// mask for that source instant, its first channel read as the
+    /// probability, on the grid [`CutoutStatus::step_ms`] names. A still
+    /// takes one mask, whatever it is named. A set from the `source` that
+    /// made the masks already there adds to them; a set from another
+    /// replaces them.
+    #[serde(rename = "cutout.import")]
+    CutoutImport {
+        /// The project folder.
+        path: String,
+        /// The media the masks describe.
+        media_id: String,
+        /// What the masks keep: "auto" (the default), "person" or "object".
+        /// It is the clip's cutout subject, since the two are cached apart.
+        #[serde(default)]
+        subject: Option<String>,
+        /// What made the masks, e.g. the name of a model.
+        source: String,
+        /// The directory holding the `<millis>.png` files.
+        masks: String,
+    },
+
+    /// Renders an open project's active timeline to a file: titles painted,
+    /// then the frame loop and the mix. A timeline whose cutouts still lack
+    /// masks is refused ([`ErrorCode::Refused`]) and nothing is rendered:
+    /// this build finds no masks itself, see [`Request::CutoutStatus`] and
+    /// [`Request::CutoutImport`]. Returns at once with the job's name; the
     /// render runs on its own thread and reports through [`Event`]s, ending
     /// in [`Event::ExportDone`] or [`Event::ExportFailed`]. One export runs
     /// at a time; a second is refused as [`ErrorCode::Busy`].
@@ -297,6 +339,14 @@ pub enum Reply {
     Media(MediaSummary),
     /// [`Request::CatalogueList`].
     Packages(Vec<PackageInfo>),
+    /// `catalogue.textPresets`.
+    TextPresets(Vec<TextPresetInfo>),
+    /// `catalogue.animations`.
+    Animations(Vec<AnimationInfo>),
+    /// `cutout.status`.
+    Cutouts(Vec<CutoutStatus>),
+    /// `cutout.import`.
+    MasksImported(MasksImported),
     /// [`Request::TemplateList`].
     Templates(Vec<TemplateInfo>),
     /// [`Request::TemplateSave`].
@@ -439,6 +489,66 @@ pub struct ParamInfo {
     pub labels: Vec<String>,
 }
 
+/// One text preset, as `catalogue.textPresets` lists it.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextPresetInfo {
+    /// Stable for ever; project files store it. "default" is the plain title.
+    pub id: String,
+    /// What an editor calls it.
+    pub name: String,
+    /// The look, in the document's own title fields, with `content` as the
+    /// words a new title starts with.
+    pub style: concat_project::model::TextStyle,
+    /// Where the title sits, as a frame-height fraction from the centre,
+    /// when the preset has an opinion.
+    pub offset_y: Option<f64>,
+    /// A font file the preset brings with it, on this machine.
+    pub font: Option<String>,
+}
+
+/// The animations one slot of a clip offers, as `catalogue.animations`
+/// lists them.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimationInfo {
+    /// "in", "out" or "combo".
+    pub slot: String,
+    /// The names, in menu order; a clip's animation stores one.
+    pub names: Vec<String>,
+}
+
+/// What one media file's cutout still needs, as `cutout.status` reports it.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CutoutStatus {
+    /// The media.
+    pub media_id: String,
+    /// The file the masks describe.
+    pub media_path: String,
+    /// What the cutout keeps: "auto", "person" or "object".
+    pub subject: String,
+    /// A still: one mask answers for every instant.
+    pub still: bool,
+    /// The stretches of source, in seconds, the timeline shows.
+    pub ranges: Vec<[f64; 2]>,
+    /// The grid masks are kept on, in milliseconds of source.
+    pub step_ms: u64,
+    /// The source instants, in milliseconds, with no mask yet. Empty when
+    /// the cutout can be exported.
+    pub missing: Vec<u64>,
+}
+
+/// What `cutout.import` stored.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MasksImported {
+    /// The media.
+    pub media_id: String,
+    /// How many masks were stored.
+    pub imported: usize,
+}
+
 /// Why a request has no reply, as a program reads it. The JSON-RPC number
 /// each maps to is [`ErrorCode::number`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -551,20 +661,6 @@ impl From<Result<Reply, ApiError>> for Response {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all_fields = "camelCase")]
 pub enum Event {
-    /// A cutout's masks are being found ahead of an export.
-    #[serde(rename = "cutout.progress")]
-    CutoutProgress {
-        /// The job.
-        job: String,
-        /// The project folder.
-        path: String,
-        /// The media being analysed.
-        media_id: String,
-        /// True while a model downloads, false while it runs.
-        fetching: bool,
-        /// How far along, `0..=1`.
-        fraction: f32,
-    },
     /// The export moved on.
     #[serde(rename = "export.progress")]
     ExportProgress {
@@ -621,8 +717,7 @@ impl Event {
     /// The job this event is about.
     pub fn job(&self) -> &str {
         match self {
-            Event::CutoutProgress { job, .. }
-            | Event::ExportProgress { job, .. }
+            Event::ExportProgress { job, .. }
             | Event::ExportDone { job, .. }
             | Event::ExportFailed { job, .. } => job,
         }

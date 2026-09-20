@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
+// Moved 2026-09-20 from the window crate (`concat/src/presets.rs`) for the
+// Cook video engine fork, which has no window, so the API can list them.
 
-//! Text presets: a title's look, named, that the library's Text page
-//! offers as a card. The built-in ones ship in the binary; a folder of
+//! Text presets: a title's look, named, that an editor offers as a card. The built-in ones ship in the binary; a folder of
 //! TOML files beside the app's settings adds more, and a preset shared
 //! between people travels as a folder with its font inside.
 //!
@@ -34,14 +35,16 @@
 
 use std::path::{Path, PathBuf};
 
-use concat_host::AppDirs;
 use concat_project::model::{TextAlign, TextStyle};
+
+use crate::AppDirs;
 use serde::Deserialize;
 
 /// One look a title can be given.
 pub struct TextPreset {
     /// Stable for ever; "default" is the plain title.
     pub id: String,
+    /// What the card is called.
     pub name: String,
     /// The look, with `content` as the words the card places.
     pub style: TextStyle,

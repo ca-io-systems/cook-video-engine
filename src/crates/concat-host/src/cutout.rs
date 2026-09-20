@@ -1,165 +1,75 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
+// Modified 2026-09-20 for the Cook video engine fork: the on-device
+// inference and the model downloads are removed; masks are imported.
 
-//! Finding the masks a cutout is made of.
+//! Which masks a cutout still needs, and bringing them in.
 //!
 //! A clip with a cutout needs a mask for every source instant it shows, on
-//! the analysis grid `concat-vision` reads by. This is the job that fills
-//! the gaps: it picks the model the clip's subject asks for, fetches it if
-//! it is not on disk yet, decodes the media at the model's size along each
-//! missing stretch, runs the model frame by frame, and writes what it
-//! finds into the media's mask store in the project folder. A still is
-//! one frame; footage is [`concat_vision::MASK_RATE`] frames a second of
-//! source.
+//! the grid `concat-vision` reads by: a still is one mask; footage is
+//! [`concat_vision::MASK_RATE`] masks a second of source. This fork finds
+//! none of them itself. It says which are missing ([`Cutouts::requests`],
+//! [`Cutouts::missing`]) so that a caller can have them made elsewhere,
+//! and it takes a finished set in ([`Cutouts::import`]), all of it or none
+//! of it, recording the name of whatever made it.
 //!
-//! Which model: the person model for a person, the object model for an
-//! object, and for a subject left on automatic the person model is tried
-//! on the first frame and the object model takes over when it finds no
-//! one. The choice is written into the store, so the rest of the run and
-//! every later one agree. With nothing downloaded and no network, the
-//! compiled-in person model answers instead.
+//! An export asks the same question before it renders and is refused while
+//! any mask is missing: footage with a cutout is never rendered untreated.
 //!
-//! One job at a time through a [`SingleFlight`], like every long job the
-//! host runs; the window queues the next media behind it. A model loads
-//! on first use and stays loaded.
+//! One import at a time through a [`SingleFlight`], like every long job the
+//! host runs.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
-use concat_core::time::{FrameRate, Rational};
-use concat_media::{DecodeOptions, Decoder, FrameSource};
 use concat_project::model::{MediaKind, Project, Subject};
-use concat_vision::segment::Kind;
-use concat_vision::{MASK_RATE, MaskStore, ModelId, Segmenter, mask_dir, models};
+use concat_vision::{Mask, MaskStore, mask_dir};
 
 use crate::jobs::SingleFlight;
 
-/// What one analysis covers.
+/// The grid masks are kept on, in milliseconds of source: an instant that
+/// is a whole number of these is one a mask can be asked for.
+pub const STEP_MS: u64 = 1000 / concat_vision::MASK_RATE as u64;
+
+/// What one media file's cutout covers.
 #[derive(Clone, Debug)]
-pub struct AnalyseRequest {
+pub struct MaskRequest {
     /// The project folder the masks are cached under.
     pub project: PathBuf,
-    /// The media file to analyse.
+    /// The media file the masks describe.
     pub media_path: String,
-    /// The media's picture size, for the person model's working size.
-    pub media_size: (u32, u32),
-    /// A still: one frame answers for every instant.
+    /// A still: one mask answers for every instant.
     pub still: bool,
     /// What to keep.
     pub subject: Subject,
-    /// The stretches of source, in seconds, that clips show. Instants
-    /// already analysed inside them are skipped.
+    /// The stretches of source, in seconds, that clips show.
     pub ranges: Vec<(f64, f64)>,
 }
 
-/// How far an analysis has got, as it reports it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Progress {
-    /// A model is being downloaded: bytes so far, of about this many.
-    Fetching {
-        /// Bytes received.
-        received: u64,
-        /// Bytes expected.
-        total: u64,
-    },
-    /// Masks are being found: `0..=1` of the instants wanted.
-    Analysing(f32),
-}
-
-/// The analysis service: the models, loaded once each, and the one-job
-/// slot.
+/// The import service: the one-job slot.
+#[derive(Default)]
 pub struct Cutouts {
     gate: Arc<SingleFlight>,
-    /// The app's data directory, where downloaded models live.
-    data: PathBuf,
-    selfie: OnceLock<Result<Arc<Segmenter>, String>>,
-    person: Mutex<Option<Arc<Segmenter>>>,
-    object: Mutex<Option<Arc<Segmenter>>>,
 }
 
 impl Cutouts {
-    /// A service with nothing loaded yet, keeping its models under `data`.
-    pub fn new(data: &Path) -> Cutouts {
-        Cutouts {
-            gate: Arc::new(SingleFlight::new()),
-            data: data.to_path_buf(),
-            selfie: OnceLock::new(),
-            person: Mutex::new(None),
-            object: Mutex::new(None),
-        }
+    /// A service with nothing running.
+    pub fn new() -> Cutouts {
+        Cutouts::default()
     }
 
-    /// Whether an analysis is running.
+    /// Whether an import is running.
     pub fn is_busy(&self) -> bool {
         self.gate.is_busy()
     }
 
-    /// Asks the running analysis to stop after the frame in hand.
-    pub fn cancel(&self) {
-        self.gate.cancel();
-    }
-
-    /// Whether a downloadable model is on disk.
-    pub fn installed(&self, id: ModelId) -> bool {
-        models::installed(&self.data, id)
-    }
-
-    fn selfie(&self) -> Result<Arc<Segmenter>, String> {
-        self.selfie
-            .get_or_init(|| Segmenter::selfie().map(Arc::new))
-            .clone()
-    }
-
-    /// The person or object model, fetched first when it is not on disk.
-    fn downloaded(
-        &self,
-        id: ModelId,
-        cancel: &AtomicBool,
-        progress: &mut dyn FnMut(Progress),
-    ) -> Result<Arc<Segmenter>, String> {
-        let slot = match id {
-            ModelId::Person => &self.person,
-            ModelId::Object => &self.object,
-            _ => return Err("not a segmenting model".to_owned()),
-        };
-        if let Some(loaded) = slot.lock().map_err(|_| "model slot poisoned")?.as_ref() {
-            return Ok(Arc::clone(loaded));
-        }
-        let file = models::model_file(&self.data, id);
-        if !models::installed(&self.data, id) {
-            fetch(id, &file, cancel, progress)?;
-        }
-        let segmenter = Arc::new(match id {
-            ModelId::Person => Segmenter::person(&file)?,
-            _ => Segmenter::object(&file)?,
-        });
-        *slot.lock().map_err(|_| "model slot poisoned")? = Some(Arc::clone(&segmenter));
-        Ok(segmenter)
-    }
-
-    /// The person model, or the compiled-in one when the download cannot
-    /// happen: a cutout with no network is a worse cutout, not none.
-    fn person_or_selfie(
-        &self,
-        cancel: &AtomicBool,
-        progress: &mut dyn FnMut(Progress),
-    ) -> Result<Arc<Segmenter>, String> {
-        match self.downloaded(ModelId::Person, cancel, progress) {
-            Ok(model) => Ok(model),
-            Err(error) if error.contains("cancelled") => Err(error),
-            Err(_) => self.selfie(),
-        }
-    }
-
-    /// What the active timeline's cutouts need analysed: one request per
-    /// media and subject, since two clips of one file that keep different
-    /// things need different masks, each covering the stretches of source
-    /// its clips show. Paired with the media's id, for a caller that keys
-    /// its bookkeeping by it. The window asks after every change and the
-    /// API asks before an export; both get the same list.
-    pub fn requests(project: &Project, project_dir: &Path) -> Vec<(String, AnalyseRequest)> {
-        let mut wanted: Vec<(String, AnalyseRequest)> = Vec::new();
+    /// What the active timeline's cutouts need: one request per media and
+    /// subject, since two clips of one file that keep different things need
+    /// different masks, each covering the stretches of source its clips
+    /// show. Paired with the media's id, for a caller that keys its
+    /// bookkeeping by it.
+    pub fn requests(project: &Project, project_dir: &Path) -> Vec<(String, MaskRequest)> {
+        let mut wanted: Vec<(String, MaskRequest)> = Vec::new();
         for clip in &project.active().clips {
             let Some(cutout) = clip.cutout.as_ref() else {
                 continue;
@@ -184,10 +94,9 @@ impl Cutouts {
                 Some((_, request)) => request.ranges.push(range),
                 None => wanted.push((
                     media.id.clone(),
-                    AnalyseRequest {
+                    MaskRequest {
                         project: project_dir.to_path_buf(),
                         media_path: media.path.clone(),
-                        media_size: (media.width.unwrap_or(0), media.height.unwrap_or(0)),
                         still: media.kind == MediaKind::Image,
                         subject: cutout.subject,
                         ranges: vec![range],
@@ -198,279 +107,163 @@ impl Cutouts {
         wanted
     }
 
-    /// How many instants `request` still needs, without doing anything.
-    /// A store made by a model the subject would not pick now needs all
-    /// of them again.
-    pub fn outstanding(request: &AnalyseRequest) -> usize {
+    /// The source instants, in milliseconds, `request` has no mask for yet,
+    /// ascending. A still with no mask is missing instant `0`.
+    pub fn missing(request: &MaskRequest) -> Vec<u64> {
         let store = MaskStore::open(&mask_dir(
             &request.project,
             &request.media_path,
             request.subject,
         ));
-        let stale = match (request.subject, store.model()) {
-            (_, None) => false,
-            (Subject::Person, Some(model)) => model == ModelId::Object.name(),
-            (Subject::Object, Some(model)) => model != ModelId::Object.name(),
-            (Subject::Auto, _) => false,
-        };
-        if stale {
-            return usize::MAX;
-        }
         if request.still {
-            return usize::from(store.is_empty());
+            return if store.is_empty() { vec![0] } else { Vec::new() };
         }
-        missing(&store, &request.ranges).len()
+        let mut wanted: Vec<u64> = request
+            .ranges
+            .iter()
+            .flat_map(|&(from, to)| store.missing(from, to))
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        wanted
     }
 
-    /// Fills the masks `request` is missing. Blocks for the whole run, so
-    /// run it on its own thread; `progress` is called as it goes. Returns
-    /// how many masks were written.
-    pub fn analyse(
+    /// How many instants `request` still needs.
+    pub fn outstanding(request: &MaskRequest) -> usize {
+        Self::missing(request).len()
+    }
+
+    /// Brings the masks in `frames` into the store `request` names: each is
+    /// a source instant in milliseconds and the PNG whose first channel is
+    /// the mask there. `source` names what made them. Every picture is read
+    /// before anything is stored, and the set lands whole or not at all;
+    /// see [`MaskStore::import`]. Returns how many masks were stored.
+    pub fn import(
         &self,
-        request: &AnalyseRequest,
-        progress: &mut dyn FnMut(Progress),
+        request: &MaskRequest,
+        source: &str,
+        frames: &[(u64, PathBuf)],
     ) -> Result<usize, String> {
-        let job = self.gate.begin("cutout analysis")?;
-        let cancel = job.cancel_handle();
+        let _job = self.gate.begin("mask import")?;
+        let mut masks: Vec<(u64, Mask)> = Vec::with_capacity(frames.len());
+        for (millis, file) in frames {
+            let bytes = std::fs::read(file)
+                .map_err(|error| format!("could not read {}: {error}", file.display()))?;
+            let mask = Mask::from_png(&bytes)
+                .ok_or_else(|| format!("{} is not a PNG a mask can be read from", file.display()))?;
+            // A still keeps its one mask at instant zero, whatever the
+            // caller named it.
+            masks.push((if request.still { 0 } else { *millis }, mask));
+        }
         let mut store = MaskStore::open(&mask_dir(
             &request.project,
             &request.media_path,
             request.subject,
         ));
-        if Self::outstanding(request) == usize::MAX {
-            store.clear();
-        }
-
-        // The model the subject names, or for automatic the one the
-        // store already records; the first frame decides otherwise.
-        let mut segmenter = match request.subject {
-            Subject::Person => Some(self.person_or_selfie(&cancel, progress)?),
-            Subject::Object => Some(self.downloaded(ModelId::Object, &cancel, progress)?),
-            Subject::Auto => match store.model() {
-                Some(model) if model == ModelId::Object.name() => {
-                    Some(self.downloaded(ModelId::Object, &cancel, progress)?)
-                }
-                Some(_) => Some(self.person_or_selfie(&cancel, progress)?),
-                None => None,
-            },
-        };
-
-        let (width, height) = request.media_size;
-        let size_for = |segmenter: &Segmenter| segmenter.input_size(width, height);
-
-        if request.still {
-            if !store.is_empty() {
-                return Ok(0);
-            }
-            let frame_with = |segmenter: &Segmenter| {
-                let (w, h) = size_for(segmenter);
-                let options = DecodeOptions::default().scaled_to(w, h).limited_to(1);
-                let mut decoder = Decoder::open(&request.media_path, &options)
-                    .map_err(|error| error.to_string())?;
-                decoder
-                    .next_frame()
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| format!("{}: no picture to analyse", request.media_path))
-            };
-            let segmenter = match segmenter {
-                Some(segmenter) => segmenter,
-                None => {
-                    let person = self.person_or_selfie(&cancel, progress)?;
-                    person.begin();
-                    let mask = person.mask(&frame_with(&person)?)?;
-                    if mask.is_blank() {
-                        self.downloaded(ModelId::Object, &cancel, progress)?
-                    } else {
-                        store.set_model(person.name())?;
-                        store.put(0, &mask)?;
-                        progress(Progress::Analysing(1.0));
-                        return Ok(1);
-                    }
-                }
-            };
-            segmenter.begin();
-            let mask = segmenter.mask(&frame_with(&segmenter)?)?;
-            store.set_model(segmenter.name())?;
-            store.put(0, &mask)?;
-            progress(Progress::Analysing(1.0));
-            return Ok(1);
-        }
-
-        let wanted = missing(&store, &request.ranges);
-        let total = wanted.len();
-        if total == 0 {
-            return Ok(0);
-        }
-        let step_ms = 1000 / u64::from(MASK_RATE);
-        let mut done = 0usize;
-        progress(Progress::Analysing(0.0));
-
-        // Each unbroken run of missing instants is one pass of a decoder
-        // paced to the analysis grid, so no frame is sought twice, and one
-        // run of the person model's memory.
-        for run in runs(&wanted, step_ms) {
-            let start = Rational::new(run[0] as i64, 1000);
-            let mut active = match &segmenter {
-                Some(segmenter) => Arc::clone(segmenter),
-                None => self.person_or_selfie(&cancel, progress)?,
-            };
-            let open = |segmenter: &Segmenter| {
-                let (w, h) = size_for(segmenter);
-                let options = DecodeOptions::default()
-                    .starting_at(start)
-                    .scaled_to(w, h)
-                    .at_rate(FrameRate::new(Rational::new(i64::from(MASK_RATE), 1)))
-                    .limited_to(run.len() as u64);
-                Decoder::open(&request.media_path, &options).map_err(|error| error.to_string())
-            };
-            let mut decoder = open(&active)?;
-            active.begin();
-            let mut next = 0usize;
-            while next < run.len() {
-                if job.cancelled() {
-                    return Err("cutout analysis cancelled".to_owned());
-                }
-                let Some(frame) = decoder.next_frame().map_err(|error| error.to_string())? else {
-                    // The file ran out before its stated length: what was
-                    // found is what there is.
-                    break;
-                };
-                let mut mask = active.mask(&frame)?;
-                if segmenter.is_none() {
-                    // Automatic, undecided: the person model has just
-                    // looked at the first frame. Nobody there means the
-                    // object model takes the whole run, from this frame.
-                    if mask.is_blank() && active.kind() != Kind::Object {
-                        active = self.downloaded(ModelId::Object, &cancel, progress)?;
-                        decoder = open(&active)?;
-                        active.begin();
-                        let Some(again) =
-                            decoder.next_frame().map_err(|error| error.to_string())?
-                        else {
-                            break;
-                        };
-                        mask = active.mask(&again)?;
-                    }
-                    store.set_model(active.name())?;
-                    segmenter = Some(Arc::clone(&active));
-                } else if store.model().is_none() {
-                    store.set_model(active.name())?;
-                }
-                store.put(run[next], &mask)?;
-                next += 1;
-                done += 1;
-                progress(Progress::Analysing(done as f32 / total as f32));
-            }
-        }
-        progress(Progress::Analysing(1.0));
-        Ok(done)
+        store.import(source, &masks)
     }
 }
 
-/// Streams a model into `file`, by way of a `.part` beside it, reporting
-/// every couple of megabytes and stopping when `cancel` is set.
-///
-/// Concat's own mirror first, the upstream it was filled from second: see
-/// [`crate::models`]. Whichever answers, the bytes are checked against the
-/// digest the table carries before anything is renamed into place, so a
-/// truncated or substituted file never becomes an installed model.
-pub(crate) fn fetch(
-    id: ModelId,
-    file: &Path,
-    cancel: &AtomicBool,
-    progress: &mut dyn FnMut(Progress),
-) -> Result<(), String> {
-    let spec = id.spec();
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
-    }
-    let partial = file.with_extension("part");
-    progress(Progress::Fetching {
-        received: 0,
-        total: spec.bytes,
-    });
-
-    let mut last: String = String::new();
-    for url in crate::models::sources(spec.file, spec.upstream) {
-        match stream(&url, &partial, spec.bytes, cancel, progress) {
-            Ok(()) => {
-                if let Err(error) = crate::models::verify(&partial, spec.sha256) {
-                    let _ = std::fs::remove_file(&partial);
-                    // A mirror that serves the wrong bytes is not something
-                    // upstream can fix, and trying it next would only hide
-                    // which of the two is wrong.
-                    return Err(error);
-                }
-                return std::fs::rename(&partial, file)
-                    .map_err(|error| format!("could not finish {}: {error}", file.display()));
-            }
-            // The partial stays for the next source, or the next time:
-            // whichever answers takes up where this one stopped.
-            Err(error) => {
-                if cancel.load(Ordering::Relaxed) {
-                    return Err(error);
-                }
-                last = error;
-            }
-        }
-    }
-    Err(format!("could not fetch the {} model: {last}", spec.file))
-}
-
-/// One attempt at one URL, through the shared downloader: into `partial`,
-/// taking up from whatever of it is already there.
-fn stream(
-    url: &str,
-    partial: &Path,
-    estimate: u64,
-    cancel: &AtomicBool,
-    progress: &mut dyn FnMut(Progress),
-) -> Result<(), String> {
-    crate::models::download(
-        url,
-        partial,
-        estimate,
-        cancel,
-        "cutout analysis cancelled",
-        &mut |received, total| progress(Progress::Fetching { received, total }),
-    )
-    .map(|_| ())
-}
-
-/// Every instant the ranges need that the store lacks, ascending, once.
-fn missing(store: &MaskStore, ranges: &[(f64, f64)]) -> Vec<u64> {
-    let mut wanted: Vec<u64> = ranges
-        .iter()
-        .flat_map(|&(from, to)| store.missing(from, to))
+/// The masks in `dir`, by the instant each file is named for: `<millis>.png`,
+/// with or without leading zeros. Ascending. Files named anything else are
+/// not masks and are left out.
+pub fn frames_in(dir: &Path) -> Result<Vec<(u64, PathBuf)>, String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| format!("could not read {}: {error}", dir.display()))?;
+    let mut frames: Vec<(u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let millis = name.to_str()?.strip_suffix(".png")?.parse::<u64>().ok()?;
+            Some((millis, entry.path()))
+        })
         .collect();
-    wanted.sort_unstable();
-    wanted.dedup();
-    wanted
-}
-
-/// The instants split into runs a step apart.
-fn runs(instants: &[u64], step: u64) -> Vec<Vec<u64>> {
-    let mut out: Vec<Vec<u64>> = Vec::new();
-    for &at in instants {
-        match out.last_mut() {
-            Some(run) if run.last().is_some_and(|&last| last + step == at) => run.push(at),
-            _ => out.push(vec![at]),
-        }
-    }
-    out
+    frames.sort_unstable_by_key(|(millis, _)| *millis);
+    frames.dedup_by_key(|(millis, _)| *millis);
+    Ok(frames)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "concat-host-cutout-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
+    }
+
+    fn request(project: &Path, still: bool) -> MaskRequest {
+        MaskRequest {
+            project: project.to_path_buf(),
+            media_path: "clip.mp4".to_owned(),
+            still,
+            subject: Subject::Person,
+            ranges: vec![(0.0, 0.2)],
+        }
+    }
+
     #[test]
-    fn instants_group_into_runs_a_step_apart() {
-        assert_eq!(
-            runs(&[0, 100, 200, 500, 600, 900], 100),
-            vec![vec![0, 100, 200], vec![500, 600], vec![900]]
+    fn footage_is_missing_every_instant_until_masks_are_imported() {
+        let project = scratch("missing");
+        let request = request(&project, false);
+        assert_eq!(Cutouts::missing(&request), vec![0, 100, 200]);
+
+        let incoming = project.join("incoming");
+        std::fs::create_dir_all(&incoming).expect("a directory");
+        for millis in [0u64, 100, 200] {
+            std::fs::write(
+                incoming.join(format!("{millis:09}.png")),
+                Mask::filled(4, 4, 255).to_png(),
+            )
+            .expect("writes");
+        }
+        std::fs::write(incoming.join("notes.txt"), "not a mask").expect("writes");
+        let frames = frames_in(&incoming).expect("reads");
+        assert_eq!(frames.len(), 3);
+
+        let cutouts = Cutouts::new();
+        assert_eq!(cutouts.import(&request, "cloud-model", &frames), Ok(3));
+        assert_eq!(Cutouts::outstanding(&request), 0);
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn a_picture_that_is_not_a_png_stores_nothing() {
+        let project = scratch("bad");
+        let request = request(&project, false);
+        let good = project.join("000000000.png");
+        let bad = project.join("000000100.png");
+        std::fs::write(&good, Mask::filled(4, 4, 255).to_png()).expect("writes");
+        std::fs::write(&bad, b"not a png").expect("writes");
+        let cutouts = Cutouts::new();
+        assert!(
+            cutouts
+                .import(&request, "cloud-model", &[(0, good), (100, bad)])
+                .is_err()
         );
-        assert!(runs(&[], 100).is_empty());
+        assert_eq!(Cutouts::missing(&request), vec![0, 100, 200]);
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn a_still_needs_one_mask_and_keeps_it_at_zero() {
+        let project = scratch("still");
+        let request = request(&project, true);
+        assert_eq!(Cutouts::missing(&request), vec![0]);
+        let file = project.join("000004200.png");
+        std::fs::write(&file, Mask::filled(4, 4, 255).to_png()).expect("writes");
+        let cutouts = Cutouts::new();
+        assert_eq!(cutouts.import(&request, "cloud-model", &[(4200, file)]), Ok(1));
+        assert!(Cutouts::missing(&request).is_empty());
+        let _ = std::fs::remove_dir_all(&project);
     }
 }

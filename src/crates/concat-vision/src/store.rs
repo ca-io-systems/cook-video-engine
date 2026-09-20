@@ -6,10 +6,10 @@
 //! One directory per media file per subject, inside the project's `cache/`
 //! folder so it travels with the project and vanishes with it, holding one
 //! PNG per analysed source instant, named by that instant in milliseconds,
-//! and a `model` file naming the model that made them. The host writes
-//! them as it analyses; the renderer opens the directory, reads the names,
-//! and asks for the mask nearest a source time. Nothing is ever indexed:
-//! the file names are the index.
+//! and a `model` file naming whatever made them. The host imports them a
+//! set at a time ([`MaskStore::import`]); the renderer opens the
+//! directory, reads the names, and asks for the mask nearest a source
+//! time. Nothing is ever indexed: the file names are the index.
 //!
 //! Decoded masks are kept in a process-wide cache, since a preview asks for
 //! the same handful over and over while the playhead sits still, and an
@@ -276,6 +276,118 @@ impl MaskStore {
         Ok(())
     }
 
+    /// Brings a set of masks made by `model` into the store, all of them
+    /// or none.
+    ///
+    /// The set is first written whole into a directory beside this one,
+    /// together with the masks already here when the same `model` made
+    /// them - a set from another model replaces what was here, as
+    /// [`MaskStore::set_model`] would. That directory then takes this
+    /// one's place by two renames, so a reader sees the old masks or the
+    /// new ones and never half of each, and a failure at any step leaves
+    /// the old masks where they were. Everything decoded from the old
+    /// files is forgotten, since a name can now hold different pixels.
+    ///
+    /// Regions read under smart strokes go with the masks they were read
+    /// against, as they do in [`MaskStore::clear`], unless the model is
+    /// the same and they still describe the same footage.
+    pub fn import(&mut self, model: &str, masks: &[(u64, Mask)]) -> Result<usize, String> {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err("an imported mask set names what made it".to_owned());
+        }
+        if masks.is_empty() {
+            return Err("an imported mask set holds at least one mask".to_owned());
+        }
+        let parent = self
+            .dir
+            .parent()
+            .ok_or_else(|| format!("{} has no parent directory", self.dir.display()))?
+            .to_path_buf();
+        let name = self
+            .dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("{} has no usable name", self.dir.display()))?
+            .to_owned();
+        let staging = parent.join(format!("{name}.incoming"));
+        let outgoing = parent.join(format!("{name}.outgoing"));
+        let _ = std::fs::remove_dir_all(&staging);
+        let _ = std::fs::remove_dir_all(&outgoing);
+        std::fs::create_dir_all(&staging)
+            .map_err(|error| format!("could not create {}: {error}", staging.display()))?;
+
+        let result = (|| -> Result<Vec<u64>, String> {
+            let same_model = self.model.as_deref() == Some(model);
+            let mut times: Vec<u64> = Vec::new();
+            if same_model {
+                for &millis in &self.times {
+                    let from = mask_file(&self.dir, millis);
+                    let to = mask_file(&staging, millis);
+                    std::fs::copy(&from, &to)
+                        .map_err(|error| format!("could not keep {}: {error}", from.display()))?;
+                    times.push(millis);
+                }
+                let strokes = self.dir.join("strokes");
+                if strokes.is_dir() {
+                    copy_tree(&strokes, &staging.join("strokes"))?;
+                }
+            }
+            for (millis, mask) in masks {
+                let file = mask_file(&staging, *millis);
+                std::fs::write(&file, mask.to_png())
+                    .map_err(|error| format!("could not write {}: {error}", file.display()))?;
+                times.push(*millis);
+            }
+            std::fs::write(model_file(&staging), model)
+                .map_err(|error| format!("could not record the model: {error}"))?;
+            times.sort_unstable();
+            times.dedup();
+            Ok(times)
+        })();
+        let times = match result {
+            Ok(times) => times,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+        };
+
+        let had_old = self.dir.is_dir();
+        if had_old {
+            std::fs::rename(&self.dir, &outgoing).map_err(|error| {
+                let _ = std::fs::remove_dir_all(&staging);
+                format!("could not set {} aside: {error}", self.dir.display())
+            })?;
+        }
+        if let Err(error) = std::fs::rename(&staging, &self.dir) {
+            if had_old {
+                let _ = std::fs::rename(&outgoing, &self.dir);
+            }
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!(
+                "could not put the masks in {}: {error}",
+                self.dir.display()
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&outgoing);
+
+        self.forget_decoded();
+        self.times = times;
+        self.model = Some(model.to_owned());
+        Ok(masks.len())
+    }
+
+    /// Drops every decoded or resolved mask of this directory from memory.
+    fn forget_decoded(&self) {
+        if let Ok(mut cache) = mask_cache().lock() {
+            cache.retain(|file| !file.starts_with(&self.dir));
+        }
+        if let Ok(mut cache) = resolved_cache().lock() {
+            cache.retain(|key| !key.file.starts_with(&self.dir));
+        }
+    }
+
     /// Forgets every mask on disk and in memory, for a media file whose
     /// masks should be found again.
     pub fn clear(&mut self) {
@@ -297,6 +409,25 @@ impl MaskStore {
         let _ = std::fs::remove_dir_all(self.dir.join("strokes"));
         let _ = std::fs::remove_dir(&self.dir);
     }
+}
+
+/// Copies a directory and everything under it.
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to)
+        .map_err(|error| format!("could not create {}: {error}", to.display()))?;
+    let entries = std::fs::read_dir(from)
+        .map_err(|error| format!("could not read {}: {error}", from.display()))?;
+    for entry in entries.flatten() {
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        if source.is_dir() {
+            copy_tree(&source, &target)?;
+        } else {
+            std::fs::copy(&source, &target)
+                .map_err(|error| format!("could not copy {}: {error}", source.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// What besides the file decides a resolved mask: the mode, the feather
@@ -546,5 +677,74 @@ mod tests {
         assert!(store.is_empty());
         assert!(!dir.exists());
         assert!(MaskStore::open(&dir).mask_at(0.0).is_none());
+    }
+
+    #[test]
+    fn an_import_lands_whole_and_names_what_made_it() {
+        let dir = scratch("import").join("masks");
+        let mut store = MaskStore::open(&dir);
+        let set = vec![
+            (0, Mask::filled(4, 4, 10)),
+            (100, Mask::filled(4, 4, 20)),
+            (200, Mask::filled(4, 4, 30)),
+        ];
+        assert_eq!(store.import("cloud-a", &set), Ok(3));
+        let reopened = MaskStore::open(&dir);
+        assert_eq!(reopened.len(), 3);
+        assert_eq!(reopened.model(), Some("cloud-a"));
+        assert!(reopened.missing(0.0, 0.2).is_empty());
+        assert_eq!(reopened.mask_at(0.1).map(|mask| mask.at(0, 0)), Some(20));
+        // Nothing of the two directories the swap goes through is left.
+        let parent = dir.parent().expect("a parent");
+        assert!(!parent.join("masks.incoming").exists());
+        assert!(!parent.join("masks.outgoing").exists());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[test]
+    fn an_import_from_the_same_model_adds_to_what_was_there() {
+        let dir = scratch("import-more").join("masks");
+        let mut store = MaskStore::open(&dir);
+        store
+            .import("cloud-a", &[(0, Mask::filled(4, 4, 10))])
+            .expect("imports");
+        store
+            .import("cloud-a", &[(100, Mask::filled(4, 4, 20))])
+            .expect("imports");
+        assert_eq!(MaskStore::open(&dir).len(), 2);
+        let _ = std::fs::remove_dir_all(dir.parent().expect("a parent"));
+    }
+
+    #[test]
+    fn an_import_from_another_model_replaces_what_was_there() {
+        let dir = scratch("import-other").join("masks");
+        let mut store = MaskStore::open(&dir);
+        store
+            .import("cloud-a", &[(0, Mask::filled(4, 4, 10))])
+            .expect("imports");
+        // Read once, so the old pixels are in memory under this name.
+        assert_eq!(store.mask_at(0.0).map(|mask| mask.at(0, 0)), Some(10));
+        store
+            .import("cloud-b", &[(0, Mask::filled(4, 4, 99))])
+            .expect("imports");
+        assert_eq!(store.model(), Some("cloud-b"));
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.mask_at(0.0).map(|mask| mask.at(0, 0)), Some(99));
+        let _ = std::fs::remove_dir_all(dir.parent().expect("a parent"));
+    }
+
+    #[test]
+    fn a_refused_import_leaves_the_old_masks_alone() {
+        let dir = scratch("import-refused").join("masks");
+        let mut store = MaskStore::open(&dir);
+        store
+            .import("cloud-a", &[(0, Mask::filled(4, 4, 10))])
+            .expect("imports");
+        assert!(store.import("cloud-a", &[]).is_err());
+        assert!(store.import("  ", &[(0, Mask::filled(4, 4, 1))]).is_err());
+        let reopened = MaskStore::open(&dir);
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened.mask_at(0.0).map(|mask| mask.at(0, 0)), Some(10));
+        let _ = std::fs::remove_dir_all(dir.parent().expect("a parent"));
     }
 }

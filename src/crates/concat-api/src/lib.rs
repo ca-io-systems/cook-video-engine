@@ -41,7 +41,7 @@ use concat_effects::Catalogue;
 use concat_effects::manifest::Kind;
 use concat_export::{ExportClip, ExportRequest};
 pub use concat_host::AppDirs;
-use concat_host::cutout::{self, AnalyseRequest, Cutouts};
+use concat_host::cutout::{self, Cutouts, MaskRequest};
 use concat_host::export::{self, Exporter};
 use concat_host::preview::{FrameSpec, Monitor};
 use concat_host::session::EditorView;
@@ -51,8 +51,9 @@ use concat_project::Command;
 use concat_project::model::VideoSettings;
 
 pub use message::{
-    API_VERSION, ApiError, Dirs, Done, ErrorCode, Event, ExportSpec, Fill, PackageInfo, ParamInfo,
-    Picture, Reply, Request, Response, Started, VersionInfo, Written,
+    API_VERSION, AnimationInfo, ApiError, CutoutStatus, Dirs, Done, ErrorCode, Event, ExportSpec,
+    Fill, MasksImported, PackageInfo, ParamInfo, Picture, Reply, Request, Response, Started,
+    TextPresetInfo, VersionInfo, Written,
 };
 
 /// The export sheet's middle quality, and what an export gets when the
@@ -63,7 +64,12 @@ const DEFAULT_PRESET: &str = "medium";
 
 /// What every build of the API serves, before what is decided by the
 /// build or the embedder is added; see [`VersionInfo::capabilities`].
-const CAPABILITIES: &[&str] = &["events"];
+///
+/// `cutout.import` says this build finds no masks itself: a cutout's masks
+/// are made elsewhere and brought in with [`Request::CutoutImport`], and an
+/// export that still lacks some is refused. `catalogue.presets` says the
+/// text presets and the clip animations can be listed.
+const CAPABILITIES: &[&str] = &["events", "cutout.import", "catalogue.presets"];
 
 /// Where a job's events go. Called from the job's thread, so a transport
 /// that writes them to a caller locks its writer inside.
@@ -96,7 +102,7 @@ impl Api {
     pub fn with_dirs(dirs: AppDirs, events: EventSink) -> Api {
         Api {
             titles: Titles::new(&dirs),
-            cutouts: Arc::new(Cutouts::new(&dirs.data)),
+            cutouts: Arc::new(Cutouts::new()),
             monitor: Monitor::new(),
             exporter: Exporter::new(),
             sessions: BTreeMap::new(),
@@ -180,6 +186,22 @@ impl Api {
             }
             Request::MediaImport { path, file } => view(self.import(&path, &file)?),
             Request::CatalogueList { kind } => Ok(Reply::Packages(catalogue(kind.as_deref())?)),
+            Request::CatalogueTextPresets => Ok(Reply::TextPresets(self.text_presets())),
+            Request::CatalogueAnimations => Ok(Reply::Animations(animations())),
+            Request::CutoutStatus { path } => Ok(Reply::Cutouts(self.cutout_status(&path)?)),
+            Request::CutoutImport {
+                path,
+                media_id,
+                subject,
+                source,
+                masks,
+            } => Ok(Reply::MasksImported(self.import_masks(
+                &path,
+                &media_id,
+                subject.as_deref(),
+                &source,
+                &masks,
+            )?)),
             Request::TemplateList => Ok(Reply::Templates(templates::list(&self.dirs.config))),
             Request::TemplateInstantiate {
                 template,
@@ -379,11 +401,31 @@ impl Api {
 
         let project_path = session.path().to_owned();
         let project_dir = PathBuf::from(&project_path);
-        let masks: Vec<(String, AnalyseRequest)> =
-            Cutouts::requests(session.project(), &project_dir)
-                .into_iter()
-                .filter(|(_, request)| Cutouts::outstanding(request) != 0)
-                .collect();
+        // A cutout with no masks would render its footage untreated, and
+        // this build finds none itself: the export is refused until the
+        // caller has imported them, and the refusal says which.
+        let lacking: Vec<String> = Cutouts::requests(session.project(), &project_dir)
+            .into_iter()
+            .filter_map(|(media_id, request)| {
+                let missing = Cutouts::outstanding(&request);
+                (missing != 0).then(|| {
+                    format!(
+                        "{media_id} ({}): {missing} missing",
+                        request.subject.key()
+                    )
+                })
+            })
+            .collect();
+        if !lacking.is_empty() {
+            return Err(ApiError::new(
+                ErrorCode::Refused,
+                format!(
+                    "The export needs cutout masks that have not been imported: {}. \
+                     See cutout.status, then cutout.import.",
+                    lacking.join("; ")
+                ),
+            ));
+        }
         let titles = self.title_clips(session, width, height);
         let mut request = export::request(session, &host_spec, titles);
         request.width = width;
@@ -404,8 +446,6 @@ impl Api {
             name: started.job.clone(),
             path: started.path.clone(),
             request,
-            masks,
-            cutouts: Arc::clone(&self.cutouts),
             events: Arc::clone(&self.events),
         };
         let thread = std::thread::Builder::new()
@@ -414,6 +454,98 @@ impl Api {
             .map_err(|error| ApiError::failed(format!("could not start the export: {error}")))?;
         self.jobs.threads.push((started.job.clone(), thread));
         Ok(started)
+    }
+
+    /// [`Request::CatalogueTextPresets`]: the built-in looks, then the ones
+    /// in this machine's `text-presets` folder.
+    pub fn text_presets(&self) -> Vec<TextPresetInfo> {
+        concat_host::text_presets::all(&self.dirs)
+            .into_iter()
+            .map(|preset| TextPresetInfo {
+                id: preset.id,
+                name: preset.name,
+                style: preset.style,
+                offset_y: preset.offset_y,
+                font: preset
+                    .font
+                    .map(|path| path.to_string_lossy().into_owned()),
+            })
+            .collect()
+    }
+
+    /// [`Request::CutoutStatus`]: for every media file the active timeline
+    /// cuts out, which source instants still have no mask.
+    pub fn cutout_status(&self, path: &str) -> Result<Vec<CutoutStatus>, ApiError> {
+        let session = self.session(path)?;
+        let project_dir = PathBuf::from(session.path());
+        Ok(Cutouts::requests(session.project(), &project_dir)
+            .into_iter()
+            .map(|(media_id, request)| CutoutStatus {
+                missing: Cutouts::missing(&request),
+                media_id,
+                media_path: request.media_path,
+                subject: request.subject.key().to_owned(),
+                still: request.still,
+                ranges: request.ranges.iter().map(|&(from, to)| [from, to]).collect(),
+                step_ms: cutout::STEP_MS,
+            })
+            .collect())
+    }
+
+    /// [`Request::CutoutImport`]: every `<millis>.png` in `masks` becomes
+    /// the mask for that source instant of `media_id`, all of them or none.
+    pub fn import_masks(
+        &mut self,
+        path: &str,
+        media_id: &str,
+        subject: Option<&str>,
+        source: &str,
+        masks: &str,
+    ) -> Result<MasksImported, ApiError> {
+        let subject = match subject {
+            None | Some("auto") => concat_project::model::Subject::Auto,
+            Some("person") => concat_project::model::Subject::Person,
+            Some("object") => concat_project::model::Subject::Object,
+            Some(other) => {
+                return Err(ApiError::invalid(format!(
+                    "{other:?} is not a subject: auto, person or object"
+                )));
+            }
+        };
+        let session = self.session(path)?;
+        let media = session.project().media_by_id(media_id).ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::NotFound,
+                format!("no media {media_id} in this project"),
+            )
+        })?;
+        let request = MaskRequest {
+            project: PathBuf::from(session.path()),
+            media_path: media.path.clone(),
+            still: media.kind == concat_project::model::MediaKind::Image,
+            subject,
+            ranges: Vec::new(),
+        };
+        let frames = cutout::frames_in(Path::new(masks)).map_err(ApiError::failed)?;
+        if frames.is_empty() {
+            return Err(ApiError::invalid(format!(
+                "{masks} holds no <millis>.png masks"
+            )));
+        }
+        let imported = self
+            .cutouts
+            .import(&request, source, &frames)
+            .map_err(|message| {
+                if self.cutouts.is_busy() {
+                    ApiError::new(ErrorCode::Busy, message)
+                } else {
+                    ApiError::failed(message)
+                }
+            })?;
+        Ok(MasksImported {
+            media_id: media_id.to_owned(),
+            imported,
+        })
     }
 
     /// [`Request::ExportCancel`].
@@ -425,9 +557,6 @@ impl Api {
                 format!("no job {job} is running"),
             ));
         }
-        // Whichever phase it is in: the analysis ahead of the render, or
-        // the render itself.
-        self.cutouts.cancel();
         self.exporter.cancel();
         Ok(())
     }
@@ -554,8 +683,6 @@ struct ExportJob {
     name: String,
     path: String,
     request: ExportRequest,
-    masks: Vec<(String, AnalyseRequest)>,
-    cutouts: Arc<Cutouts>,
     events: EventSink,
 }
 
@@ -563,10 +690,8 @@ impl ExportJob {
     /// The whole job, start to end, on the thread it is called from. The
     /// slot is held until this returns, so the next export waits its turn.
     fn run(self, slot: concat_host::jobs::Job) {
-        let outcome = self.masks(&slot).and_then(|()| {
-            export::run(&self.request, slot.cancel_flag(), |progress| {
-                (self.events)(Event::progress(&self.name, &self.path, progress));
-            })
+        let outcome = export::run(&self.request, slot.cancel_flag(), |progress| {
+            (self.events)(Event::progress(&self.name, &self.path, progress));
         });
         let event = match outcome {
             Ok(output) => Event::ExportDone {
@@ -588,32 +713,26 @@ impl ExportJob {
         };
         (self.events)(event);
     }
+}
 
-    /// Runs every cutout analysis the timeline still needs, one after the
-    /// other, so the render that follows cuts every clip it should.
-    fn masks(&self, slot: &concat_host::jobs::Job) -> Result<(), String> {
-        for (media_id, request) in &self.masks {
-            if slot.cancelled() {
-                return Err("cancelled".to_owned());
-            }
-            self.cutouts.analyse(request, &mut |progress| {
-                let (fetching, fraction) = match progress {
-                    cutout::Progress::Fetching { received, total } => {
-                        (true, received as f32 / total.max(1) as f32)
-                    }
-                    cutout::Progress::Analysing(fraction) => (false, fraction),
-                };
-                (self.events)(Event::CutoutProgress {
-                    job: self.name.clone(),
-                    path: self.path.clone(),
-                    media_id: media_id.clone(),
-                    fetching,
-                    fraction,
-                });
-            })?;
-        }
-        Ok(())
-    }
+/// [`Request::CatalogueAnimations`]: the names each slot of a clip offers,
+/// in menu order.
+fn animations() -> Vec<AnimationInfo> {
+    use concat_project::model::AnimationSlot;
+    [
+        ("in", AnimationSlot::In),
+        ("out", AnimationSlot::Out),
+        ("combo", AnimationSlot::Combo),
+    ]
+    .into_iter()
+    .map(|(slot, which)| AnimationInfo {
+        slot: slot.to_owned(),
+        names: concat_project::animation::names(which)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    })
+    .collect()
 }
 
 /// [`Request::CatalogueList`]: the built-in packages plus whatever

@@ -3,7 +3,7 @@
 
 //! One-at-a-time job slots for long-running work.
 //!
-//! Export, transcription and model downloads are all "one at a time", and
+//! An export and a mask import are each "one at a time", and
 //! a doc comment cannot enforce that: two exports would race each other's
 //! temp files, and a cancel flag shared between runs would let a second
 //! start clear it out from under the first. [`SingleFlight`] makes the

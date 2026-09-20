@@ -18,13 +18,8 @@ concat-project.workspace = true
 concat-export.workspace = true
 # Titles become pictures here; see titles.rs.
 concat-text.workspace = true
-# The cutout models and their masks; `infer` because the host is what
-# runs them, and ureq because the host is what fetches them.
-concat-vision = { workspace = true, features = ["infer"] }
-ureq = "2"
-# A finished download is checked against the digest its table carries
-# before anything is allowed to call it installed; see models.rs.
-sha2 = "0.10"
+# A cutout's masks: which are missing, and importing a set; see cutout.rs.
+concat-vision.workspace = true
 # The log facade. The engine writes `log::warn!` and logs.rs is what puts
 # the line in a file; a phone puts it in logcat as well.
 log = { version = "0.4", features = ["std"] }
@@ -33,6 +28,8 @@ log = { version = "0.4", features = ["std"] }
 concat-render.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+# A person's own text presets are TOML files; see text_presets.rs.
+toml = "1.1"
 
 # Engine-owned audio playback: cpal talks to the output device, memmap2 keeps
 # decoded PCM disk-backed instead of resident.
