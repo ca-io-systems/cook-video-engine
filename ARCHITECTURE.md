@@ -1,5 +1,13 @@
 # How Concat works
 
+> **Fork note (Cook video engine, 2026-09-20).** This document is upstream
+> Concat's, kept for the engine it describes. In this fork the window
+> (`concat`), `concat-android` and `concat-speech` crates do not exist, and
+> `concat-vision` and `concat-host` carry no inference: masks are imported
+> through the API (`cutout.status`, `cutout.import`). Sections 1, 5 and the
+> cutout paragraphs below describe upstream, not this tree. See `README.md`.
+
+
 A map of the engine and the window for someone who wants to change one part
 without reading the rest. Every section names the crate and the file to open
 when the picture is not enough. Diagrams are Mermaid, which GitHub renders.

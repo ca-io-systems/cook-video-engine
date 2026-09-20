@@ -71,6 +71,9 @@ const DEFAULT_PRESET: &str = "medium";
 /// text presets and the clip animations can be listed.
 const CAPABILITIES: &[&str] = &["events", "cutout.import", "catalogue.presets"];
 
+/// Where this fork's source is published; see [`VersionInfo::source`].
+const SOURCE: &str = "https://github.com/ca-io-systems/cook-video-engine";
+
 /// Where a job's events go. Called from the job's thread, so a transport
 /// that writes them to a caller locks its writer inside.
 pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
@@ -246,6 +249,11 @@ impl Api {
                 }
                 capabilities
             },
+            commit: option_env!("COOK_ENGINE_COMMIT")
+                .map(str::trim)
+                .filter(|commit| !commit.is_empty())
+                .map(str::to_owned),
+            source: SOURCE.to_owned(),
         }
     }
 

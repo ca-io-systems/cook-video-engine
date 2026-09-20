@@ -1,110 +1,80 @@
-<div align="center">
-<table width="100%">
-  <tr>
-    <td align="left" width="120">
-      <img src="https://cdn.jsdelivr.net/gh/jub0t/Concat@main/assets/logo-dark.png" alt="Concat" width="100" />
-    </td>
-    <td align="right">
-      <h1>Concat</h1>
-      <h3 style="margin-top: -10px;">The truly free, and open-source cross-platform CapCut replacement.</h3>
-    </td>
-  </tr>
-</table>
+# Cook video engine
 
-<p align="center">
-  <a href="https://github.com/jub0t/Concat/releases"><img src="https://img.shields.io/github/downloads/jub0t/concat/total?style=flat&logo=github&logoColor=F8F8F8&label=Downloads&labelColor=000000&color=c6f432" alt="Total Downloads" /></a>
-  <a href="https://github.com/jub0t/Concat/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/jub0t/Concat/ci.yml?style=flat&logo=githubactions&logoColor=F8F8F8&label=Build&labelColor=000000" alt="Build Status" /></a>
-  <a href="https://github.com/jub0t/Concat/releases"><img src="https://img.shields.io/badge/Version-0.2.2-c6f432?style=flat&logo=semver&logoColor=F8F8F8&labelColor=000000" alt="Concat Version 0.2.2" /></a>
-  <a href="https://discord.gg/DVuPfpXfqP"><img src="https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?style=flat&logo=discord&logoColor=F8F8F8&labelColor=000000" alt="Join Concat Discord" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL%20v3-c6f432?style=flat&logo=gnu&logoColor=F8F8F8&labelColor=000000" alt="License: AGPL-3.0-or-later" /></a>
-</p>
+A headless fork of [Concat](https://github.com/jub0t/Concat), the open-source
+video editor by Jareer and the Concat contributors. This repository is **not**
+the Concat application and is not maintained or endorsed by the Concat project.
+If you want the desktop editor, get it from
+[jub0t/Concat](https://github.com/jub0t/Concat).
 
-<img src="https://cdn.jsdelivr.net/gh/jub0t/Concat@main/assets/editor.png" alt="Concat editor" width="100%" />
+Cook ([trycook.ai](https://trycook.ai)) runs this engine on its servers as the
+timeline, editing engine and exporter behind its browser video editor. Cook's
+own software talks to it only through the JSON-RPC API in
+`src/crates/concat-api`, which is the boundary the
+[Concat Plugin Exception](LICENSE-EXCEPTIONS.md) describes.
 
-</div>
+## Licence and source
 
----
+Everything here is licensed under **AGPL-3.0-or-later**, as upstream is; see
+[`LICENSE`](LICENSE), [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) and
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Upstream's copyright and
+SPDX notices are kept in every file. "Concat" and its logo are marks of the
+Concat project ([`TRADEMARK.md`](TRADEMARK.md)); this fork uses the name only to
+say what it is forked from, and ships none of the logos.
 
-## About
+This repository is the complete corresponding source of the engine Cook
+serves. The branch Cook builds from is `cook/white-mantis`; the engine's
+`version` call reports the commit a running build was made from.
 
-Concat is everything you use CapCut for. No watermarks. No paywalls. No subscriptions.
+## What was changed, and when
 
-It runs entirely on your machine, powered by a native Rust engine. Install it and start cutting. No account, no setup.
+Forked from upstream commit `28d94eae86d6177f0c090f50ddf383748a4b07a1`
+(2026-09-19). Changes made from 2026-09-20:
 
-## Highlights
+- **Removed:** the desktop window (`crates/concat`), the Android wrapper
+  (`crates/concat-android`), the speech crate (`crates/concat-speech`:
+  whisper.cpp transcription and Kokoro text to speech), ONNX Runtime and every
+  inference path in `concat-vision` and `concat-host` (person and object
+  cutout models, the smart cutout brush), the compiled-in person model, the
+  model download table and downloader, and the packaging, mobile and model
+  mirror workflows and scripts that served them. The engine downloads nothing
+  and runs no model.
+- **Cutout masks are imported, never inferred.** `cutout.status` lists the
+  source instants a timeline's cutouts still have no mask for; `cutout.import`
+  takes a finished set of `<millis>.png` masks in, all of them or none, and
+  records what made them. `export.run` is refused while any mask is missing,
+  so footage with a cutout is never rendered untreated.
+- **Inventories through the API.** The text preset inventory moved from the
+  window crate into `concat-host` and is listed by `catalogue.textPresets`;
+  clip animation names are listed by `catalogue.animations`.
+- **Linux x86-64 compile fix** in `concat-media/src/ffi.rs` (the `va_list`
+  parameter of the FFmpeg log callback). Upstream's own CI fails on it at the
+  forked commit.
 
-- 🚫 **No watermarks.** No account. No paywall.
-- 🔒 **100% local.** Nothing leaves your machine.
-- 🎬 **Multi-track editing.** Several timelines per project.
-- ✂️ **Cut fast.** Split, trim, merge, transitions, speed control.
-- 💬 **Auto-captions.** Runs on your machine, offline.
-- 🗣️ **Text-to-Speech.** Free, local voices.
-- 🎙️ **Voice filters.** Clean up or play with your sound.
-- 📝 **Titles and styled text.**
-- 📦 **Templates.** Build an edit once, reuse it.
-- 🖥️ **macOS, Windows and Linux.** Same app everywhere.
-- 🌍 **Twelve languages.** Add one with a single JSON file, see [TRANSLATING.md](TRANSLATING.md).
+## Build and test
 
-## Get started
+Rust 1.93 or newer, FFmpeg 8.1 shared development libraries (`FFMPEG_DIR`),
+`libclang`, `pkg-config` and, on Linux, `libasound2-dev`.
 
-Concat is currently in **Beta version (pre-release)**. **Download** the latest build from [Releases](https://github.com/jub0t/Concat/releases).
+```sh
+cd src
+cargo test --workspace
+cargo build --release -p concat-cli
+```
 
-**Reporting something:** every run writes a log, and Settings › About has the button that opens it along with the one that copies your system information. Attach both to an [issue](https://github.com/jub0t/Concat/issues) and the report arrives with everything it needs. The last ten runs are kept, so yesterday's is still there; nothing is ever sent anywhere on its own.
+`cook/e2e/engine_e2e.py` drives a built `concat-cli` through a real import,
+edit, preview and export and measures the exported file:
 
-**Platform support:**
+```sh
+python3 cook/e2e/engine_e2e.py --cli src/target/release/concat-cli \
+  --footage some-video-with-sound.mp4 --out /tmp/engine-e2e
+```
 
-- ✅ **Windows**
-  - ✅ x86_64
-- ✅ **macOS** — unsigned binaries; run:
-  `xattr -dr com.apple.quarantine /Applications/Concat.app`
-  - ✅ Intel
-  - ✅ Silicon
-- ✅ **Linux**
-  - ✅ ARM
-  - ✅ x86_64
-- ✅ **Android**
-  - ✅ Phones
-  - ✅ Tablets
-- 🧪 **iOS / iPadOS**
-  - 🧪 iPhone
-  - 🧪 iPad
+## Serving it
 
-**Status:** ✅ Supported · 🚧 Work in progress · 🧪 To be tested
+```sh
+concat-cli serve --json 127.0.0.1:7420 --token "$CONCAT_API_TOKEN"
+```
 
-**System requirements:**
-
-Concat runs everything on your machine, so the hardware sets the ceiling. The minimum column is what a build will run on at all; the recommended column is what makes 1080p editing feel smooth and keeps 4K exports and captions from being a wait.
-
-| | Minimum | Recommended |
-|---|---|---|
-| **CPU** | Any 64-bit processor from 2013 or later | 6 cores or more |
-| **GPU** | None. Without a usable GPU the window and monitor fall back to the CPU | Any GPU with Metal (macOS), DirectX 12 (Windows) or Vulkan (Linux) |
-| **RAM** | **4 GB** | **16 GB** for 4K timelines and the larger caption models |
-| **Storage** | **500 MB** for the app and the smallest caption model | **2 GB** for every optional model, plus room for projects and exports |
-
-Optional models download from the settings panel on first use and then never need the network again: auto-captions 78 MB to 488 MB depending on the whisper size you pick, text-to-speech 132 MB or 349 MB, person cutout 15 MB, object cutout 179 MB, and the cutout brush 40 MB.
-
-## How to Contribute
-
-> [!IMPORTANT]
-> The best way to contribute is to grab a build from the [Releases](https://github.com/jub0t/Concat/releases) page and use it: find where it breaks, and say where it could be better.
->
-> Ready to write code? [CONTRIBUTING.md](./CONTRIBUTING.md) covers setup, the layout of the tree, the checks to run, and how contributions are licensed. [ROADMAP.MD](./ROADMAP.MD) says where the project is going, and [this Discussion](https://github.com/jub0t/Concat/discussions/3) is where it was announced.
-> 
-> Contributors are free to claim a `@Contributor` role in the Discord server, just ask for it.
-
-## Contributors
-
-<a href="https://github.com/jub0t/Concat/graphs/contributors">
-  <img alt="Contributors" src="https://contrib.rocks/image?repo=jub0t/concat">
-</a>
-
-## ⭐ Star History
-
-<a href="https://www.star-history.com/?repos=jub0t%2Fconcat&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=jub0t/concat&type=date&theme=dark&logscale&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=jub0t/concat&type=date&logscale&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=jub0t/concat&type=date&logscale&legend=top-left" />
- </picture>
-</a>
+One JSON-RPC 2.0 request per line; `version` first. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md) section 7 and
+`src/crates/concat-api/src/message.rs` for every method.

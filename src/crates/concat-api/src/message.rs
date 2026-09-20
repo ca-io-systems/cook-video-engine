@@ -379,6 +379,14 @@ pub struct VersionInfo {
     /// the list is not served, whatever the build; a name added later is
     /// not a version bump, so a caller ignores names it does not know.
     pub capabilities: Vec<String>,
+    /// The commit of this fork the build was made from, when the build was
+    /// told (`COOK_ENGINE_COMMIT` at compile time, which the Dockerfile
+    /// sets); with `source`, where a person can read exactly what is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Where this build's source is published.
+    #[serde(default)]
+    pub source: String,
 }
 
 /// The app's directories, as paths.
