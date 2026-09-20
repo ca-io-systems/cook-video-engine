@@ -219,16 +219,15 @@ class Families:
 
     def keys_animation_layer(self):
         p = self.project("keys")
-        white = self.media(p, self.white)
-        clip_id = self.place(p, white["id"], 0)
-        self.apply(p, op="trimClip", clipId=clip_id, edge="end", delta=-(self.clip(p, clip_id)["duration"] - 3.0))
+        m = self.media(p, self.footage)
+        clip_id = self.piece(p, m["id"], 5, 8)          # a bright stretch of the footage
         self.apply(p, op="setClipKey", clipId=clip_id, property="opacity", at=0.0, value=0.0)
         self.apply(p, op="setClipKey", clipId=clip_id, property="opacity", at=1.0, value=1.0)
         out, why = self.export(p, "keys.mp4")
         early = luma(out, 0.3, "iw/2:ih/2:iw/4:ih/4") if out else None
         late = luma(out, 2.7, "iw/2:ih/2:iw/4:ih/4") if out else None
-        self.check("keyframes", "opacity keyed from 0 to 1 makes a white clip brighten over its length",
-                   out and early < 80 and late > 190, {"lumaAt0_3s": early, "lumaAt2_7s": late, "refusal": why})
+        self.check("keyframes", "opacity keyed from 0 to 1 brings bright footage up from black over the clip",
+                   out and early < 45 and late > early + 60, {"lumaAt0_3s": early, "lumaAt2_7s": late, "refusal": why})
 
         p = self.project("animation")
         white = self.media(p, self.white)
@@ -246,35 +245,35 @@ class Families:
                    {"preset": preset, "firstAndSettledFramesAlike": alike, "refusal": why})
 
         p = self.project("layer")
-        white = self.media(p, self.white)
-        clip_id = self.place(p, white["id"], 0)
-        self.apply(p, op="trimClip", clipId=clip_id, edge="end", delta=-(self.clip(p, clip_id)["duration"] - 4.0))
+        m = self.media(p, self.footage)
+        self.piece(p, m["id"], 5, 9)                    # bright snow: inverted, it is dark
         layer = self.apply(p, op="addLayerClip", trackId=None, start=2.0, duration=2.0, effectId="concat.invert",
                            name="Invert")
         out, why = self.export(p, "layer.mp4")
         outside = luma(out, 1.0, "iw/2:ih/2:iw/4:ih/4") if out else None
         under = luma(out, 3.0, "iw/2:ih/2:iw/4:ih/4") if out else None
-        self.check("effect layer", "an invert layer over the second half turns the white clip under it black",
-                   out and layer.get("createdId") and outside > 200 and under < 60,
+        self.check("effect layer", "an invert layer over the second half turns bright footage under it dark",
+                   out and layer.get("createdId") and outside > 120 and under < outside - 40,
                    {"lumaOutsideLayer": outside, "lumaUnderLayer": under, "refusal": why})
 
     def transition(self):
         p = self.project("transition")
-        white, black = self.media(p, self.white), self.media(p, self.black)
-        first = self.place(p, white["id"], 0)
-        self.apply(p, op="trimClip", clipId=first, edge="end", delta=-(self.clip(p, first)["duration"] - 3.0))
+        m = self.media(p, self.footage)
+        first = self.piece(p, m["id"], 5, 8)            # bright snow
         track = self.clip(p, first)["trackId"]
-        second = self.apply(p, op="addClip", mediaId=black["id"], trackId=track, start=3.0)["createdId"]
+        second = self.apply(p, op="addClip", mediaId=m["id"], trackId=track, start=3.0)["createdId"]
+        self.apply(p, op="trimClip", clipId=second, edge="start", delta=20.0)      # a dark street, from 20 s
+        self.apply(p, op="moveClips", moves=[{"clipId": second, "start": 3.0, "trackId": track}])
         self.apply(p, op="trimClip", clipId=second, edge="end", delta=-(self.clip(p, second)["duration"] - 3.0))
         self.apply(p, op="updateClip", clipId=second, patch={"transitionIn": {"id": "cross-fade", "duration": 1.0}})
         out, why = self.export(p, "transition.mp4")
         # The incoming clip reaches back over the outgoing one, so the fade runs over the second before the cut
         # at 3 s: 2.0 s to 3.0 s, with its middle at 2.5 s.
-        before = luma(out, 1.0, "iw/2:ih/2:iw/4:ih/4") if out else None
+        before = luma(out, 1.5, "iw/2:ih/2:iw/4:ih/4") if out else None
         middle = luma(out, 2.5, "iw/2:ih/2:iw/4:ih/4") if out else None
-        after = luma(out, 5.0, "iw/2:ih/2:iw/4:ih/4") if out else None
-        self.check("transition", "a 1 s cross-fade from white to black is grey half way through",
-                   out and before > 200 and after < 40 and 40 < middle < 200,
+        after = luma(out, 4.5, "iw/2:ih/2:iw/4:ih/4") if out else None
+        self.check("transition", "half way through a 1 s cross-fade the picture is between the bright clip and the dark one",
+                   out and before - after > 40 and after + 10 < middle < before - 10,
                    {"lumaBefore": before, "lumaMidTransition": middle, "lumaAfter": after, "refusal": why})
 
     def audio(self):
